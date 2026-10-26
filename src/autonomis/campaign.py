@@ -20,7 +20,13 @@ from autonomis.storage import read_json, write_json
 def prepare_campaign(config, *, kind="real"):
     data = load_table(config.dataset, expected_sha256=config.expected_sha256)
     folder = config.output_dir
+    ledger_path = folder / "ledger.sqlite"
     manifest_path = folder / "splits.json"
+    if folder.exists() and any(folder.iterdir()) and not ledger_path.exists():
+        raise ValueError("Ledger is missing from an existing campaign; refusing to reset accounting")
+    if ledger_path.exists() and not all((folder / name).exists()
+                                      for name in ("splits.json", "campaign.json")):
+        raise ValueError("Incomplete campaign provenance; refusing silent reconstruction")
     if manifest_path.exists():
         splits = read_splits(manifest_path, data)
     else:
@@ -34,7 +40,7 @@ def prepare_campaign(config, *, kind="real"):
               "exploration_seconds": config.exploration_seconds,
               "terminal_seconds": config.terminal_seconds}
     write_json(folder / "campaign.json", frozen)
-    path = folder / "ledger.sqlite"
+    path = ledger_path
     if path.exists():
         ledger = Ledger(path, dataset_hash=data.sha256, split_hash=split_hash(splits))
         if ledger.identity["kind"] != kind:
@@ -91,6 +97,7 @@ def _publish_audit(config, data, ledger, selection):
     saved = read_json(proxy["audit_path"])
     lookup = dict(zip(data.ids, data.y, strict=True))
     metrics = score_predictions([lookup[value] for value in saved["ids"]], saved["scores"])
+    submission_is_proxy = selection["submission"]["path"] == proxy["path"]
     summary = {"kind": ledger.identity["kind"], "dataset_role": config.dataset_role,
                "official_submission": False, "official_output_contract": "unavailable",
                "attempts_used": ledger.used, "submission_path": selection["submission"]["path"],
@@ -98,7 +105,10 @@ def _publish_audit(config, data, ledger, selection):
                "submission_training_fraction": selection["submission"]["training_fraction"],
                "proxy_path": proxy["path"], "proxy_training_fraction": proxy["training_fraction"],
                "audit_metrics": metrics, "audit_metric_applies_to": proxy["model_hash"],
-               "final_has_internal_holdout_score": False, "hidden_test_score": None,
+               "final_has_internal_holdout_score": submission_is_proxy,
+               "submission_internal_metrics": metrics if submission_is_proxy else None,
+               "submission_role": "audited_fallback" if submission_is_proxy else "full_data_final",
+               "hidden_test_score": None,
                "efficiency_factor": None, "technical_errors": selection["errors"]}
     write_json(config.output_dir / "summary.json", summary)
     return summary
@@ -119,6 +129,8 @@ def run_campaign(config, *, kind="real", families=None):
         if runtime["host"] != socket.gethostname() or runtime["families"] != list(available):
             raise ValueError("Training host or supported families changed on resume")
     else:
+        if ledger.used:
+            raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
         runtime = {"host": socket.gethostname(), "families": list(available), "started_at": time.time()}
         write_json(runtime_path, runtime)
     exploration_deadline = runtime["started_at"] + config.exploration_seconds
@@ -128,9 +140,17 @@ def run_campaign(config, *, kind="real", families=None):
 
     def execute(recipe, phase, train_ids, valid_ids, *, details, fixed_count=None):
         deadline = exploration_deadline if phase in {"search", "probe"} else terminal_deadline
-        timeout = min(config.timeout_seconds, deadline - time.time())
-        if timeout <= 2:
+        durations = [row["result"].get("wall_seconds", row["result"].get("fit_seconds", 0))
+                     for row in ledger.attempts() if row["status"] == "succeeded"
+                     and row["phase"] == "search"
+                     and row["details"]["recipe"]["family"] == recipe.family]
+        observed = max(durations, default=config.timeout_seconds)
+        factor = {"search": 1.5, "probe": 1.5, "audit": 2.0, "final": 2.5}[phase]
+        estimate = min(config.timeout_seconds, factor * observed)
+        remaining = deadline - time.time()
+        if remaining < estimate + 120:
             return None
+        timeout = min(config.timeout_seconds, remaining - 120)
         job = {"dataset_path": str(config.dataset), "dataset_hash": data.sha256,
                "train_ids": train_ids, "valid_ids": valid_ids, "fixed_tree_count": fixed_count}
         membership = fingerprint({"train": train_ids, "valid": valid_ids, "trees": fixed_count})
@@ -153,19 +173,22 @@ def run_campaign(config, *, kind="real", families=None):
         choices = finalists(observations(ledger))
         if not choices:
             raise RuntimeError("No verified search artifact is available")
-        slowest = max(o.fit_seconds for o in choices)
+        choice_keys = {o.recipe.key for o in choices}
+        slowest = max(row["result"].get("wall_seconds", row["result"]["fit_seconds"])
+                      for row in ledger.attempts() if row["phase"] == "search"
+                      and row["status"] == "succeeded" and row["recipe_key"] in choice_keys)
         now = time.time()
         can_probe = (len(choices) == 2 and ledger.remaining >= 4 and
                      choices[0].roc_auc - choices[1].roc_auc <= 0.01 and
-                     now + 3 * slowest < exploration_deadline and
-                     now + 7.5 * slowest + 2 < terminal_deadline)
+                     now + 3 * slowest + 120 < exploration_deadline and
+                     now + 7.5 * slowest + 120 < terminal_deadline)
         if can_probe:
             for choice in choices:
                 previous = [r for r in ledger.attempts() if r["phase"] == "probe"
                             and r["recipe_key"] == choice.recipe.key]
                 if previous:
                     continue
-                if ledger.remaining <= 2 or time.time() + 6 * slowest + 2 >= terminal_deadline:
+                if ledger.remaining <= 2 or time.time() + 6 * slowest + 120 >= terminal_deadline:
                     break
                 execute(choice.recipe, "probe", splits["probe_train"], splits["probe_valid"],
                         details={"parent_id": choice.attempt_id, "reason": "Frozen paired check"},
