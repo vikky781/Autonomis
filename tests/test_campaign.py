@@ -28,7 +28,8 @@ def inline_fixture_attempt(ledger, recipe, phase, membership_hash, job, **kwargs
     folder = kwargs["output_dir"] / "attempts" / str(attempt) / "artifact"
     model = StoredResponse(job["train_ids"])
     manifest = save_bundle(folder, model=model, preprocessor=None, recipe=recipe,
-        provenance={"synthetic_fixture": True, "train_ids": job["train_ids"], "phase": phase})
+        provenance={"synthetic_fixture": True, "train_ids": job["train_ids"], "phase": phase,
+                    "dataset_hash": job["dataset_hash"]})
     data = load_table(job["dataset_path"])
     lookup = dict(zip(data.ids, data.y, strict=True))
     valid = job["valid_ids"]
