@@ -16,9 +16,10 @@ def positive_scores(model, X):
     classes = np.asarray(model.classes_)
     positive = np.flatnonzero(classes == 1)
     probabilities = np.asarray(model.predict_proba(X))
-    if len(positive) != 1 or probabilities.shape != (len(X), len(classes)):
+    row_count = X.shape[0] if hasattr(X, "shape") else len(X)
+    if len(positive) != 1 or probabilities.shape != (row_count, len(classes)):
         raise ValueError("Invalid positive-class mapping or prediction shape")
-    return validate_scores(probabilities[:, positive[0]], len(X))
+    return validate_scores(probabilities[:, positive[0]], row_count)
 
 
 def score_predictions(labels, values):
