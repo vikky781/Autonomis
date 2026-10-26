@@ -1,0 +1,17 @@
+dataset: data/reference/ibm_telco/Telco-Customer-Churn.csv
+dataset_role: public_reference
+expected_sha256: 16320c9c1ec72448db59aa0a26a0b95401046bef5d02fd3aeb906448e3055e91
+output_dir: campaigns/reference
+budget: 15
+search_limit: 11
+probe_limit: 2
+seed: 20261026
+threads: 4
+timeout_seconds: 1800
+exploration_seconds: 28800
+terminal_seconds: 36000
+enable_training: false
+training_host: null
+backend: cpu
+feature_ablation: true
+official_submission: false
