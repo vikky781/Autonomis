@@ -2,11 +2,11 @@
 
 Budget-constrained customer churn experimentation for Utkrishta 2026. The controller proposes experiments from prior development results, with a persistent maximum of 15 training attempts.
 
-**Current boundary:** the non-GPU implementation is present. No predictive model has been trained on the development PC. GPU integration is deliberately not implemented. CPU fitting adapters are defined but their real fitting/native-model round-trips have not been executed here. Tests use non-learning fixtures; their scores are not measured model performance.
+**Current boundary:** guarded CPU and CatBoost GPU execution paths are implemented. No predictive model has been trained on the development PC. Real fitting, native-model round-trips and GPU execution have not been verified here. Tests use non-learning fixtures and mocked GPU inspection; their scores are not measured model performance.
 
 ## Safe local setup
 
-Python 3.12 is the tested interpreter series. Use a new virtual environment. The development lock captures the actual Windows verification environment; Ubuntu/native tree-model compatibility still needs verification on the training laptop.
+Python 3.12 is the tested interpreter series. Use a new virtual environment. The development lock has been verified for no-training tests on Windows and Ubuntu; native tree-model/GPU compatibility still needs verification on the training laptop.
 
 ```bash
 python -m venv .venv
@@ -29,16 +29,21 @@ Run from the repository root:
 ```bash
 python -m autonomis profile
 python -m autonomis prepare
+python -m autonomis preflight
 python -m autonomis status
 python -m autonomis plan
 python -m autonomis report
+# after verifying a worker has stopped:
+python -m autonomis reconcile --confirm-no-active-worker
 ```
 
 - `profile` verifies the raw CSV fingerprint, validates the schema, and reports data counts only.
 - `prepare` creates immutable customer partitions, campaign metadata and an empty SQLite ledger. It fits no preprocessing or predictive estimator and consumes zero attempts.
+- `preflight` checks the configured backend without fitting or reserving an attempt. GPU mode checks dataset size, CatBoost availability, NVIDIA driver/device visibility and free VRAM.
 - `status` reads the consumed/remaining budget and audit-lock state.
 - `plan` prints the next proposed recipe and rationale without reserving or running it.
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
+- `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
 Generated state is under `campaigns/reference/` and ignored by Git. Never delete or replace an active campaign ledger to obtain more fits. Preserve the full directory between runs and keep the friend's machine as its single training authority.
 
@@ -50,9 +55,24 @@ Generated state is under `campaigns/reference/` and ignored by Git. Never delete
 python -m autonomis train --execute
 ```
 
-**Do not enable training or run a baseline on the development PC.** The user's explicit instruction is to defer all real fitting to the friend's laptop. No training command has been used successfully in development. The GPU stage is a separate, unfinished integration task; it requires another instruction before proceeding.
+**Do not enable training or run a baseline on the development PC.** The user's explicit instruction is to defer all real fitting to the friend's laptop. No training command has been used successfully in development.
 
-CPU adapters are isolated in `training.py`, selected only after permission checks, and optional native dependencies are declared in the `cpu` extra. They are not installed by the safe setup above. Model-library installation/real fitting verification belongs on the training laptop, not in this development pass.
+Adapters are isolated in `training.py`, selected only after permission checks, and optional native dependencies are declared in the `cpu` and `gpu` extras. They are not installed by the safe setup above. Model-library installation and real fitting verification belong on the training laptop.
+
+## CatBoost GPU profile
+
+GPU mode is opt-in with `backend: gpu` and changes only CatBoost; Logistic Regression and LightGBM remain on CPU. It uses the frozen recipe profile from the plan: device 0, GPU RAM fraction 0.75, Plain boosting, border count 128 and maximum CTR complexity 2. Backend and resolved parameters are part of recipe/artifact identity. No automatic CPU retry or backend switch occurs after a reserved GPU attempt fails.
+
+Before the first GPU attempt, preflight requires more than 50,000 labelled rows, CatBoost from the supported `gpu` extra, visible NVIDIA device 0 with driver information, and at least 6,144 MiB free VRAM. The 7,043-row IBM reference therefore remains a CPU campaign. Preflight does not train and does not prove native GPU fitting/serialization compatibility. Any native smoke fit on campaign data is a counted experiment and must run only on the authorized laptop. CatBoost GPU retraining is not promised to be bitwise deterministic.
+
+On the authorized laptop, after verifying the accepted dataset and local package/driver compatibility, install the native extras in its isolated environment and run the read-only check:
+
+```bash
+python -m pip install -e '.[cpu,gpu]'
+python -m autonomis preflight
+```
+
+Keep `enable_training: false` during setup/preflight. Select `backend: gpu` before the campaign starts only when its data gate is met; backend changes are rejected on resume.
 
 ## Experiment protocol
 
@@ -90,6 +110,8 @@ Exports preserve customer order, validate finite probabilities, are read back fr
 The downloaded public IBM file has 7,043 rows, 21 columns, 1,869 positive labels, 11 blank TotalCharges values and no duplicated customer IDs. The byte fingerprint is recorded in [the provenance note](data/reference/ibm_telco/README.md). Git preserves CSV bytes across Windows/Ubuntu checkouts.
 
 The official portal files, hidden-test membership and sample submission are not available. Public-data equivalence is unverified. Do not look up public labels for organizer-held-out customers, silently augment training with them, or call an internal holdout the organizer's hidden test.
+
+Before an official run, replace the provisional output contract with the organizer's exact sample-submission schema and verify row identity, ordering, score semantics, and header policy. `official_submission` records that intent but does not claim compatibility by itself.
 
 ROC-AUC and Average Precision are named separately; trapezoidal PR area is not silently substituted for AP. Search/probe results are selection estimates. Hidden-test score and the PDF's undefined Efficiency Factor remain unavailable, never zero or invented. No performance improvement or winning score has been established.
 

@@ -49,10 +49,13 @@ class Proposal:
 
 class Planner:
     def __init__(self, *, families=("lr", "catboost", "lightgbm"), feature_ablation=True,
-                 seed=20261026, threads=4):
+                 seed=20261026, threads=4, backend="cpu"):
         if not families or set(families) - CATALOG.keys():
             raise ValueError("No supported family")
-        self.anchors = [Recipe(f, seed=seed, threads=threads) for f in families]
+        if backend not in {"cpu", "gpu"}:
+            raise ValueError("Backend must be cpu or gpu")
+        self.anchors = [Recipe(f, backend=backend if f == "catboost" else "cpu",
+                               seed=seed, threads=threads) for f in families]
         self.feature_ablation = feature_ablation
 
     def propose(self, history, attempted):

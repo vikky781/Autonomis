@@ -4,7 +4,7 @@ import os
 import platform
 import tempfile
 from dataclasses import dataclass
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import joblib
@@ -22,6 +22,14 @@ class Bundle:
     manifest: dict
 
 
+def _installed_version(name):
+    """Return a package version when installed, without making optional models required."""
+    try:
+        return version(name)
+    except PackageNotFoundError:
+        return None
+
+
 def save_bundle(directory, *, model, preprocessor, recipe, provenance):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -35,10 +43,16 @@ def save_bundle(directory, *, model, preprocessor, recipe, provenance):
         os.link(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
+    model_package = {"catboost": "catboost", "lightgbm": "lightgbm"}.get(recipe.family)
+    versions = {name: version(name) for name in ("numpy", "pandas", "scikit-learn", "joblib")}
+    if model_package:
+        installed = _installed_version(model_package)
+        if installed is not None:
+            versions[model_package] = installed
     manifest = {"schema_version": 1, "model_hash": file_hash(target),
                 "recipe": recipe.to_dict(), "provenance": provenance,
                 "python": platform.python_version(),
-                "versions": {name: version(name) for name in ("numpy", "pandas", "scikit-learn", "joblib")}}
+                "versions": versions}
     write_json(directory / "manifest.json", manifest)
     return manifest
 
@@ -50,7 +64,7 @@ def load_bundle(directory):
     if file_hash(target) != manifest["model_hash"]:
         raise ValueError("Artifact hash mismatch")
     for name, expected in manifest["versions"].items():
-        if version(name) != expected:
+        if _installed_version(name) != expected:
             raise ValueError(f"Artifact environment differs: {name}; use its recorded environment")
     # Only load bundles produced by this project from a trusted local location.
     payload = joblib.load(target)

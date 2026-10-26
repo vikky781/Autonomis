@@ -1,4 +1,4 @@
-"""Sequential CPU orchestration; execution requires the named training authority."""
+"""Sequential CPU/GPU orchestration; execution requires the named training authority."""
 
 import importlib.util
 import socket
@@ -15,6 +15,7 @@ from autonomis.predict import OutputContract, export_predictions, predict_bundle
 from autonomis.runner import run_attempt
 from autonomis.splits import create_splits, read_splits, save_splits, split_hash
 from autonomis.storage import read_json, write_json
+from autonomis.training import gpu_preflight
 
 
 def prepare_campaign(config, *, kind="real"):
@@ -34,7 +35,7 @@ def prepare_campaign(config, *, kind="real"):
         save_splits(manifest_path, splits)
     frozen = {"dataset_role": config.dataset_role, "dataset_hash": data.sha256,
               "split_hash": split_hash(splits), "seed": config.seed, "threads": config.threads,
-              "feature_ablation": config.feature_ablation, "kind": kind,
+              "backend": config.backend, "feature_ablation": config.feature_ablation, "kind": kind,
               "official_submission": config.official_submission,
               "timeout_seconds": config.timeout_seconds,
               "exploration_seconds": config.exploration_seconds,
@@ -85,21 +86,26 @@ def _verify(directory, data, splits, *, proxy=False):
     return checked
 
 
-def _publish_audit(config, data, ledger, selection):
+def _publish_audit(config, data, ledger, selection, *, audit_ids):
     proxy = selection["proxy"]
     for candidate in (selection["submission"], proxy):
         if load_bundle(candidate["path"]).manifest["model_hash"] != candidate["model_hash"]:
             raise ValueError("Selected artifact changed")
     if file_hash(proxy["audit_path"]) != proxy["audit_hash"]:
         raise ValueError("Audit predictions changed")
-    ledger.lock_audit({"submission": selection["submission"]["model_hash"],
-                       "proxy": proxy["model_hash"], "audit_predictions": proxy["audit_hash"]})
     saved = read_json(proxy["audit_path"])
+    expected_ids = list(audit_ids)
+    if saved.get("ids") != expected_ids:
+        raise ValueError("Audit prediction identities differ from the frozen Audit partition")
     lookup = dict(zip(data.ids, data.y, strict=True))
     metrics = score_predictions([lookup[value] for value in saved["ids"]], saved["scores"])
+    ledger.lock_audit({"submission": selection["submission"]["model_hash"],
+                       "proxy": proxy["model_hash"], "audit_predictions": proxy["audit_hash"]})
     submission_is_proxy = selection["submission"]["path"] == proxy["path"]
     summary = {"kind": ledger.identity["kind"], "dataset_role": config.dataset_role,
-               "official_submission": False, "official_output_contract": "unavailable",
+               "official_submission": config.official_submission,
+               "official_output_contract": "unavailable" if not config.official_submission
+               else "configured-but-unverified",
                "attempts_used": ledger.used, "submission_path": selection["submission"]["path"],
                "submission_hash": selection["submission"]["model_hash"],
                "submission_training_fraction": selection["submission"]["training_fraction"],
@@ -117,26 +123,31 @@ def _publish_audit(config, data, ledger, selection):
 def run_campaign(config, *, kind="real", families=None):
     config.permit.check()
     data, splits, ledger = prepare_campaign(config, kind=kind)
+    if config.backend == "gpu":
+        gpu_preflight(len(data.ids))
     selection_path = config.output_dir / "selection.json"
     if selection_path.exists():
-        return _publish_audit(config, data, ledger, read_json(selection_path))
+        return _publish_audit(config, data, ledger, read_json(selection_path),
+                              audit_ids=splits["audit"])
     available = tuple(families) if families is not None else tuple(
         family for family in ("lr", "catboost", "lightgbm")
         if family == "lr" or importlib.util.find_spec(family) is not None)
     runtime_path = config.output_dir / "runtime.json"
     if runtime_path.exists():
         runtime = read_json(runtime_path)
-        if runtime["host"] != socket.gethostname() or runtime["families"] != list(available):
-            raise ValueError("Training host or supported families changed on resume")
+        if (runtime["host"] != socket.gethostname() or runtime["families"] != list(available)
+                or runtime.get("backend") != config.backend):
+            raise ValueError("Training host, backend, or supported families changed on resume")
     else:
         if ledger.used:
             raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
-        runtime = {"host": socket.gethostname(), "families": list(available), "started_at": time.time()}
+        runtime = {"host": socket.gethostname(), "families": list(available),
+                   "backend": config.backend, "started_at": time.time()}
         write_json(runtime_path, runtime)
     exploration_deadline = runtime["started_at"] + config.exploration_seconds
     terminal_deadline = runtime["started_at"] + config.terminal_seconds
     planner = Planner(families=available, feature_ablation=config.feature_ablation,
-                      seed=config.seed, threads=config.threads)
+                      seed=config.seed, threads=config.threads, backend=config.backend)
 
     def execute(recipe, phase, train_ids, valid_ids, *, details, fixed_count=None):
         deadline = exploration_deadline if phase in {"search", "probe"} else terminal_deadline
@@ -219,6 +230,7 @@ def run_campaign(config, *, kind="real", families=None):
         else:
             errors.append(f"{phase}: {row['error'] if row else 'skipped for deadline'}")
     selection = {"submission": candidates.get("final", candidates.get("audit", fallback)),
-                 "proxy": candidates.get("audit", fallback), "errors": errors}
+                 "proxy": candidates.get("audit", fallback), "errors": errors,
+                 "audit_ids": list(splits["audit"])}
     write_json(selection_path, selection)
-    return _publish_audit(config, data, ledger, selection)
+    return _publish_audit(config, data, ledger, selection, audit_ids=splits["audit"])

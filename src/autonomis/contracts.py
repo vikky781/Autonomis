@@ -29,6 +29,18 @@ DEFAULTS = {
     },
 }
 
+CATBOOST_GPU_DEFAULTS = {
+    "depth": 6, "l2_leaf_reg": 3.0, "learning_rate": 0.05, "iterations": 1000,
+    "loss_function": "Logloss", "eval_metric": "AUC", "boosting_type": "Plain",
+    "border_count": 128, "max_ctr_complexity": 2, "devices": "0", "gpu_ram_part": 0.75,
+}
+
+
+def recipe_defaults(family, backend):
+    if family == "catboost" and backend == "gpu":
+        return CATBOOST_GPU_DEFAULTS
+    return DEFAULTS[family]
+
 
 @dataclass(frozen=True)
 class Recipe:
@@ -40,22 +52,41 @@ class Recipe:
     threads: int = 4
 
     def __post_init__(self):
-        if self.backend != "cpu":
-            raise ValueError("GPU integration is deferred; only CPU recipes are implemented")
+        if self.backend not in {"cpu", "gpu"}:
+            raise ValueError("Backend must be CPU or GPU")
         if self.family not in DEFAULTS or self.feature_version not in {"V0", "V1"}:
             raise ValueError("Unknown family or feature version")
+        if self.backend == "gpu" and self.family != "catboost":
+            raise ValueError("GPU recipes are supported only for CatBoost")
         if not 1 <= self.threads <= 4 or not isinstance(self.seed, int):
             raise ValueError("Invalid thread count or seed")
-        if set(self.params) - DEFAULTS[self.family].keys():
-            raise ValueError("Unsupported model parameter")
-        params = {**DEFAULTS[self.family], **self.params}
+        defaults = recipe_defaults(self.family, self.backend)
+        if not isinstance(self.params, Mapping):
+            raise ValueError("Recipe parameters must be a mapping")
+        if set(self.params) - defaults.keys():
+            raise ValueError("Unsupported model parameter for this family/backend")
+        params = {**defaults, **self.params}
         for name, value in params.items():
+            expected = defaults[name]
+            if isinstance(expected, bool):
+                valid_type = type(value) is bool
+            elif isinstance(expected, int):
+                valid_type = type(value) is int
+            elif isinstance(expected, float):
+                valid_type = isinstance(value, (int, float)) and not isinstance(value, bool)
+            else:
+                valid_type = type(value) is type(expected)
+            if not valid_type:
+                raise ValueError(f"Invalid parameter type: {name}")
             if isinstance(value, (int, float)) and not math.isfinite(value):
                 raise ValueError(f"Nonfinite parameter: {name}")
         for name in ("C", "max_iter", "tol", "depth", "l2_leaf_reg", "learning_rate",
                      "iterations", "num_leaves", "min_child_samples", "n_estimators"):
             if name in params and params[name] <= 0:
                 raise ValueError(f"Nonpositive parameter: {name}")
+        if self.backend == "gpu" and (params["devices"] != "0" or
+                                      params["gpu_ram_part"] != 0.75):
+            raise ValueError("GPU profile is fixed to device 0 and RAM fraction 0.75")
         object.__setattr__(self, "params", MappingProxyType(params))
         fingerprint(self.to_dict())
 

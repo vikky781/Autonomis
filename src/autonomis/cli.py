@@ -14,6 +14,7 @@ from autonomis.planner import Planner
 from autonomis.predict import OutputContract, export_predictions, predict_bundle
 from autonomis.reporting import render_report
 from autonomis.storage import read_json
+from autonomis.training import gpu_preflight
 
 
 def _open_ledger(config):
@@ -26,9 +27,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Budgeted churn tooling; training disabled by default")
     parser.add_argument("--config", default="configs/campaign.yaml")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("profile", "prepare", "status", "plan", "report"):
+    for name in ("profile", "prepare", "preflight", "status", "plan", "report"):
         commands.add_parser(name)
-    training = commands.add_parser("train", help="CPU only; requires explicit host authorization")
+    reconcile = commands.add_parser("reconcile", help="Mark a verified stopped worker interrupted")
+    reconcile.add_argument("--confirm-no-active-worker", action="store_true",
+                           help="Required operator confirmation before changing ledger state")
+    training = commands.add_parser("train", help="Requires explicit host authorization and --execute")
     training.add_argument("--execute", action="store_true")
     prediction = commands.add_parser("predict", help="Load a trusted bundle; never fit")
     prediction.add_argument("--artifact", required=True)
@@ -49,6 +53,11 @@ def main(argv=None):
                      "positive_labels": int(data.y.sum()),
                      "missing_TotalCharges": int(data.X.TotalCharges.isna().sum()),
                      "official_equivalence": "unverified", "training_performed": False}
+        elif args.command == "preflight":
+            value = {"backend": config.backend, "training_performed": False}
+            if config.backend == "gpu":
+                data = load_table(config.dataset, expected_sha256=config.expected_sha256)
+                value.update(gpu_preflight(len(data.ids)))
         elif args.command == "prepare":
             _, splits, ledger = prepare_campaign(config)
             value = {"attempts_used": ledger.used, "output_dir": str(config.output_dir),
@@ -60,17 +69,36 @@ def main(argv=None):
             value = export_predictions(args.output, data.ids, predict_bundle(bundle, data.X),
                                        model_hash=bundle.manifest["model_hash"], input_hash=data.sha256,
                                        contract=OutputContract())
+        elif args.command == "reconcile":
+            ledger = _open_ledger(config)
+            ledger.reconcile_interrupted(confirm_no_active_worker=args.confirm_no_active_worker)
+            value = {"interrupted": True, "attempts_used": ledger.used,
+                     "remaining": ledger.remaining}
         else:
             ledger = _open_ledger(config)
             value = {"attempts_used": ledger.used, "remaining": ledger.remaining,
                      "audit_locked": ledger.audit_lock is not None, "kind": ledger.identity["kind"]}
             if args.command == "plan":
+                if ledger.audit_lock is not None:
+                    value.update(proposal=None, executed=False,
+                                 note="Audit identities are locked; no further training is allowed")
+                    print(json.dumps(value, indent=2, allow_nan=False))
+                    return 0
+                if (config.output_dir / "selection.json").exists():
+                    value.update(proposal=None, executed=False,
+                                 note="Terminal selection is already frozen; use report or predict")
+                    print(json.dumps(value, indent=2, allow_nan=False))
+                    return 0
                 tried = [Recipe(**row["details"]["recipe"]) for row in ledger.attempts()
                          if row["phase"] == "search"]
                 runtime = config.output_dir / "runtime.json"
-                families = tuple(read_json(runtime)["families"]) if runtime.exists() else (
+                runtime_data = read_json(runtime) if runtime.exists() else None
+                if runtime_data is not None and runtime_data.get("backend") != config.backend:
+                    raise ValueError("Configured backend differs from the frozen campaign runtime")
+                families = tuple(runtime_data["families"]) if runtime_data else (
                     "lr", "catboost", "lightgbm")
                 proposal = Planner(families=families, seed=config.seed, threads=config.threads,
+                                   backend=config.backend,
                                    feature_ablation=config.feature_ablation).propose(
                                        observations(ledger), tried)
                 value.update(proposal=proposal.to_dict() if proposal else None,

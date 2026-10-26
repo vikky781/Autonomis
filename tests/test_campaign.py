@@ -51,6 +51,15 @@ def test_disabled_campaign_does_not_create_output_or_consume_budget(tmp_path):
     assert not config.output_dir.exists()
 
 
+def test_gpu_campaign_rejects_small_reference_before_reservation(tmp_path):
+    config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "gpu", backend="gpu",
+                     permit=TrainingPermit(True, socket.gethostname()))
+    with pytest.raises(ValueError, match="50,000"):
+        campaign.run_campaign(config, kind="simulation")
+    _, _, ledger = campaign.prepare_campaign(config, kind="simulation")
+    assert ledger.used == 0
+
+
 def test_complete_simulated_campaign_locks_distinct_proxy_and_final_roles(tmp_path, monkeypatch):
     config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "simulation",
                      permit=TrainingPermit(True, socket.gethostname()))

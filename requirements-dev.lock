@@ -1,5 +1,5 @@
-# Development environment verified on Windows with Python 3.12.14.
-# CPU tree libraries and GPU integration are intentionally not installed.
+# No-training environment verified on Windows/Python 3.12.14 and Ubuntu/Python 3.12.3.
+# Native CPU/GPU tree-model libraries are intentionally not installed.
 cloudpickle==3.1.2
 colorama==0.4.6
 iniconfig==2.3.1

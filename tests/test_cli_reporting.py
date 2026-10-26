@@ -22,6 +22,8 @@ def test_profile_prepare_plan_and_report_never_reserve_a_fit(tmp_path, capsys):
     prefix = configuration(tmp_path)
     assert main([*prefix, "profile"]) == 0
     assert json.loads(capsys.readouterr().out)["rows"] == 7043
+    assert main([*prefix, "preflight"]) == 0
+    assert json.loads(capsys.readouterr().out)["training_performed"] is False
     assert main([*prefix, "prepare"]) == 0
     capsys.readouterr()
     assert main([*prefix, "plan"]) == 0
@@ -39,6 +41,17 @@ def test_training_is_refused_even_with_execute_flag(tmp_path, capsys):
     assert main([*prefix, "train", "--execute"]) == 2
     assert "Training is disabled" in capsys.readouterr().err
     assert not (tmp_path / "campaign").exists()
+
+
+def test_reconcile_requires_explicit_operator_confirmation(tmp_path, capsys):
+    prefix = configuration(tmp_path)
+    assert main([*prefix, "prepare"]) == 0
+    capsys.readouterr()
+    assert main([*prefix, "reconcile"]) == 2
+    assert "Verify the recorded worker" in capsys.readouterr().err
+    assert main([*prefix, "reconcile", "--confirm-no-active-worker"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["interrupted"] is True and result["attempts_used"] == 0
 
 
 def test_report_escapes_history_and_labels_simulations(tmp_path):

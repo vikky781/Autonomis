@@ -34,8 +34,8 @@ def run_attempt(ledger, recipe, phase, membership_hash, job, *, output_dir,
                 phase, recipe.key, membership_hash) and row["status"] == "succeeded":
             return row
     if worker is None:
-        from autonomis.training import fit_cpu_job
-        worker = fit_cpu_job
+        from autonomis.training import fit_job
+        worker = fit_job
     attempt_id = ledger.reserve(phase, recipe.key, membership_hash,
                                  details={"recipe": recipe.to_dict(), **(details or {})})
     start = time.monotonic()

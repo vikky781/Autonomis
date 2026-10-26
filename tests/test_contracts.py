@@ -16,9 +16,21 @@ def test_recipe_hash_is_stable_and_parameters_cannot_be_mutated():
         recipe.params["C"] = 2
 
 
-def test_gpu_recipe_stops_at_explicit_integration_boundary():
-    with pytest.raises(ValueError, match="GPU integration is deferred"):
-        Recipe("catboost", {}, backend="gpu")
+def test_gpu_catboost_recipe_uses_the_frozen_gpu_profile():
+    recipe = Recipe("catboost", {}, backend="gpu")
+    assert recipe.params["boosting_type"] == "Plain"
+    assert recipe.params["border_count"] == 128
+    assert recipe.params["devices"] == "0"
+    assert recipe.params["gpu_ram_part"] == 0.75
+    assert "bootstrap_type" not in recipe.params
+    assert recipe.key != Recipe("catboost").key
+
+
+def test_gpu_is_rejected_for_other_families_and_cpu_only_parameters():
+    with pytest.raises(ValueError, match="only for CatBoost"):
+        Recipe("lightgbm", {}, backend="gpu")
+    with pytest.raises(ValueError, match="family/backend"):
+        Recipe("catboost", {"bootstrap_type": "Bayesian"}, backend="gpu")
 
 
 def test_training_requires_explicit_permission_on_named_host():
@@ -32,3 +44,10 @@ def test_training_requires_explicit_permission_on_named_host():
 def test_invalid_recipes_are_rejected_before_reservation(params):
     with pytest.raises(ValueError):
         Recipe("lr", params)
+
+
+def test_recipe_rejects_malformed_parameter_types():
+    with pytest.raises(ValueError, match="parameter type"):
+        Recipe("lr", {"C": "large"})
+    with pytest.raises(ValueError, match="parameter type"):
+        Recipe("catboost", {"depth": 6.5})

@@ -20,6 +20,15 @@ def test_initial_anchors_are_unique_and_ordered():
         tried.append(proposal.recipe)
 
 
+def test_gpu_mode_applies_only_to_catboost_and_survives_mutation():
+    planner = Planner(feature_ablation=False, backend="gpu")
+    lr = planner.propose([], []).recipe
+    catboost = planner.propose([], [lr]).recipe
+    lightgbm = planner.propose([], [lr, catboost]).recipe
+    assert (lr.backend, catboost.backend, lightgbm.backend) == ("cpu", "gpu", "cpu")
+    assert catboost.changed(depth=4).backend == "gpu"
+
+
 def test_feedback_changes_regularization_direction_and_replay_is_deterministic():
     tried = anchors()
     normal = [result(1, tried[0], 0.7), result(2, tried[1], 0.82, 0.84),

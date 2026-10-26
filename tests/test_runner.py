@@ -1,11 +1,13 @@
 import socket
+import sys
+from types import SimpleNamespace
 
 import pytest
 
 from autonomis.contracts import Recipe, TrainingDisabled, TrainingPermit
 from autonomis.ledger import Ledger
 from autonomis.runner import run_attempt
-from autonomis.training import build_cpu_estimator, fit_cpu_job
+from autonomis.training import build_cpu_estimator, build_estimator, fit_cpu_job, gpu_preflight
 
 
 def fixed_worker(job):
@@ -41,6 +43,46 @@ def test_cpu_constructor_is_inspected_without_fitting():
     assert model.get_params()["C"] == 1.0
     assert model.get_params()["max_iter"] == 3000
     assert not hasattr(model, "coef_")
+
+
+def test_gpu_constructor_is_inspected_without_fitting(monkeypatch):
+    class FakeCatBoostClassifier:
+        def __init__(self, **params):
+            self.params = params
+
+    monkeypatch.setitem(sys.modules, "catboost", SimpleNamespace(
+        CatBoostClassifier=FakeCatBoostClassifier))
+    model = build_estimator(Recipe("catboost", backend="gpu"))
+    assert model.params["task_type"] == "GPU"
+    assert model.params["devices"] == "0"
+    assert model.params["gpu_ram_part"] == 0.75
+    assert model.params["boosting_type"] == "Plain"
+    with pytest.raises(ValueError, match="CPU constructor"):
+        build_cpu_estimator(Recipe("catboost", backend="gpu"))
+
+
+def test_gpu_preflight_checks_rows_driver_memory_and_package_without_training(monkeypatch):
+    with pytest.raises(ValueError, match="50,000"):
+        gpu_preflight(50_000)
+    monkeypatch.setattr("autonomis.training.importlib.util.find_spec", lambda name: object())
+    monkeypatch.setattr("autonomis.training.version", lambda name: "1.2.8")
+    completed = SimpleNamespace(returncode=0, stderr="",
+        stdout="0, NVIDIA RTX 4060 Laptop GPU, 7800, 575.57.08\n")
+    monkeypatch.setattr("autonomis.training.subprocess.run", lambda *args, **kwargs: completed)
+    result = gpu_preflight(50_001)
+    assert result["device_index"] == 0
+    assert result["free_vram_mib"] == 7800
+    assert result["catboost_version"] == "1.2.8"
+    assert result["training_performed"] is False
+
+
+def test_gpu_preflight_rejects_insufficient_free_vram(monkeypatch):
+    monkeypatch.setattr("autonomis.training.importlib.util.find_spec", lambda name: object())
+    completed = SimpleNamespace(returncode=0, stderr="",
+                                stdout="0, GPU, 6000, driver\n")
+    monkeypatch.setattr("autonomis.training.subprocess.run", lambda *args, **kwargs: completed)
+    with pytest.raises(RuntimeError, match="6144 MiB"):
+        gpu_preflight(50_001)
 
 
 def test_fake_worker_result_is_durable_and_duplicate_does_not_execute_again(tmp_path):

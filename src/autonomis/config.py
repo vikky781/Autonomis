@@ -22,6 +22,7 @@ class Config:
     terminal_seconds: int
     feature_ablation: bool
     official_submission: bool
+    backend: str
     permit: TrainingPermit
 
 
@@ -37,8 +38,8 @@ def load_config(path):
         raise ValueError("Configuration has missing or unknown keys")
     if (raw["budget"], raw["search_limit"], raw["probe_limit"]) != (15, 11, 2):
         raise ValueError("Budget allocation must be 15 / 11 / 2")
-    if raw["backend"] != "cpu":
-        raise ValueError("GPU integration is deferred")
+    if raw["backend"] not in {"cpu", "gpu"}:
+        raise ValueError("Backend must be cpu or gpu")
     if raw["dataset_role"] not in {"public_reference", "official"}:
         raise ValueError("Unknown dataset role")
     for key in ("enable_training", "feature_ablation", "official_submission"):
@@ -61,5 +62,5 @@ def load_config(path):
     return Config(root, (root / raw["dataset"]).resolve(), output, raw["dataset_role"],
                   digest, raw["seed"], raw["threads"], raw["timeout_seconds"],
                   raw["exploration_seconds"], raw["terminal_seconds"],
-                  raw["feature_ablation"], raw["official_submission"],
+                  raw["feature_ablation"], raw["official_submission"], raw["backend"],
                   TrainingPermit(raw["enable_training"], host))
