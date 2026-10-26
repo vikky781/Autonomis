@@ -7,16 +7,20 @@ from pathlib import Path
 
 
 def write_json(path, value):
+    payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
+    return write_bytes(path, payload.encode("utf-8"))
+
+
+def write_bytes(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n"
     if path.exists():
-        if path.read_text(encoding="utf-8") != payload:
+        if path.read_bytes() != payload:
             raise ValueError(f"Refusing to overwrite immutable record: {path}")
         return path
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+        with os.fdopen(descriptor, "wb") as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
