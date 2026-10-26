@@ -106,5 +106,5 @@ class TrainingPermit:
     training_host: str | None = None
 
     def check(self):
-        if not self.enabled or self.training_host != socket.gethostname():
+        if self.enabled is not True or self.training_host != socket.gethostname():
             raise TrainingDisabled("Training is disabled on this host; use the authorized laptop")
