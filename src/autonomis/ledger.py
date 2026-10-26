@@ -2,7 +2,7 @@
 
 import json
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,7 +38,7 @@ class Ledger:
             path.open("xb").close()
         except FileExistsError as error:
             raise ValueError("Campaign already exists; load it instead of resetting") from error
-        with sqlite3.connect(path) as db:
+        with closing(sqlite3.connect(path)) as db, db:
             db.executescript("""
                 CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE attempts (
