@@ -36,7 +36,7 @@ def inline_fixture_attempt(ledger, recipe, phase, membership_hash, job, **kwargs
     metrics = score_predictions([lookup[i] for i in valid], [0.5] * len(valid)) if phase in {"search", "probe"} else {}
     if metrics:
         metrics["train_roc_auc"] = 0.5
-    result = {"metrics": metrics, "fit_seconds": 0.01, "tree_count": 100,
+    result = {"metrics": metrics, "fit_seconds": job.get("fixture_seconds", 0.01), "tree_count": 100,
               "artifact": str(folder), "model_hash": manifest["model_hash"],
               "validation_predictions": [0.5] * len(valid), "validation_ids": valid,
               "training_fraction": len(job["train_ids"]) / len(data.ids)}
