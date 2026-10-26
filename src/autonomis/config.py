@@ -1,0 +1,65 @@
+"""Strict campaign configuration; training remains opt-in on a named host."""
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import yaml
+
+from autonomis.contracts import TrainingPermit
+
+
+@dataclass(frozen=True)
+class Config:
+    root: Path
+    dataset: Path
+    output_dir: Path
+    dataset_role: str
+    expected_sha256: str
+    seed: int
+    threads: int
+    timeout_seconds: int
+    exploration_seconds: int
+    terminal_seconds: int
+    feature_ablation: bool
+    official_submission: bool
+    permit: TrainingPermit
+
+
+def load_config(path):
+    path = Path(path).resolve()
+    root = path.parent.parent
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    required = {"dataset", "dataset_role", "expected_sha256", "output_dir", "budget",
+                "search_limit", "probe_limit", "seed", "threads", "timeout_seconds",
+                "exploration_seconds", "terminal_seconds", "enable_training", "training_host",
+                "backend", "feature_ablation", "official_submission"}
+    if not isinstance(raw, dict) or set(raw) != required:
+        raise ValueError("Configuration has missing or unknown keys")
+    if (raw["budget"], raw["search_limit"], raw["probe_limit"]) != (15, 11, 2):
+        raise ValueError("Budget allocation must be 15 / 11 / 2")
+    if raw["backend"] != "cpu":
+        raise ValueError("GPU integration is deferred")
+    if raw["dataset_role"] not in {"public_reference", "official"}:
+        raise ValueError("Unknown dataset role")
+    for key in ("enable_training", "feature_ablation", "official_submission"):
+        if type(raw[key]) is not bool:
+            raise ValueError(f"{key} must be a boolean")
+    for key in ("seed", "threads", "timeout_seconds", "exploration_seconds", "terminal_seconds"):
+        if type(raw[key]) is not int or raw[key] <= 0:
+            raise ValueError(f"{key} must be a positive integer")
+    if raw["threads"] > 4 or raw["terminal_seconds"] <= raw["exploration_seconds"]:
+        raise ValueError("Invalid thread/time allocation")
+    digest = raw["expected_sha256"]
+    if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+        raise ValueError("Invalid dataset SHA-256")
+    output = (root / raw["output_dir"]).resolve()
+    if not output.is_relative_to(root):
+        raise ValueError("Output directory must stay inside the project")
+    host = raw["training_host"]
+    if host is not None and (not isinstance(host, str) or not host.strip()):
+        raise ValueError("Invalid training host")
+    return Config(root, (root / raw["dataset"]).resolve(), output, raw["dataset_role"],
+                  digest, raw["seed"], raw["threads"], raw["timeout_seconds"],
+                  raw["exploration_seconds"], raw["terminal_seconds"],
+                  raw["feature_ablation"], raw["official_submission"],
+                  TrainingPermit(raw["enable_training"], host))
