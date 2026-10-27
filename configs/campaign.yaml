@@ -2,6 +2,9 @@ dataset: data/reference/ibm_telco/Telco-Customer-Churn.csv
 dataset_role: public_reference
 expected_sha256: 16320c9c1ec72448db59aa0a26a0b95401046bef5d02fd3aeb906448e3055e91
 output_dir: campaigns/reference
+history_ledgers:
+  - ../artifacts/experiment_log.jsonl
+  - ../artifacts/archive/development_public_ibm_20261027/experiment_log.jsonl
 budget: 15
 search_limit: 11
 probe_limit: 2

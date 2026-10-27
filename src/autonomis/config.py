@@ -13,6 +13,7 @@ class Config:
     root: Path
     dataset: Path
     output_dir: Path
+    history_ledgers: tuple[Path, ...]
     dataset_role: str
     expected_sha256: str
     seed: int
@@ -30,7 +31,7 @@ def load_config(path):
     path = Path(path).resolve()
     root = path.parent.parent
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    required = {"dataset", "dataset_role", "expected_sha256", "output_dir", "budget",
+    required = {"dataset", "dataset_role", "expected_sha256", "output_dir", "history_ledgers", "budget",
                 "search_limit", "probe_limit", "seed", "threads", "timeout_seconds",
                 "exploration_seconds", "terminal_seconds", "enable_training", "training_host",
                 "backend", "feature_ablation", "official_submission"}
@@ -54,12 +55,18 @@ def load_config(path):
     if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError("Invalid dataset SHA-256")
     output = (root / raw["output_dir"]).resolve()
-    if not output.is_relative_to(root):
-        raise ValueError("Output directory must stay inside the project")
+    campaign_root = (root / "campaigns").resolve()
+    if not output.is_relative_to(campaign_root) or output == campaign_root:
+        raise ValueError("Real campaign ledgers must stay under the shared campaigns directory")
+    if (not isinstance(raw["history_ledgers"], list)
+            or any(not isinstance(item, str) or not item.strip()
+                   for item in raw["history_ledgers"])):
+        raise ValueError("history_ledgers must be a list of paths")
+    history_ledgers = tuple((root / item).resolve() for item in raw["history_ledgers"])
     host = raw["training_host"]
     if host is not None and (not isinstance(host, str) or not host.strip()):
         raise ValueError("Invalid training host")
-    return Config(root, (root / raw["dataset"]).resolve(), output, raw["dataset_role"],
+    return Config(root, (root / raw["dataset"]).resolve(), output, history_ledgers, raw["dataset_role"],
                   digest, raw["seed"], raw["threads"], raw["timeout_seconds"],
                   raw["exploration_seconds"], raw["terminal_seconds"],
                   raw["feature_ablation"], raw["official_submission"], raw["backend"],

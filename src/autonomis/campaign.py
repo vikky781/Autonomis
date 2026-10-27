@@ -43,12 +43,14 @@ def prepare_campaign(config, *, kind="real"):
     write_json(folder / "campaign.json", frozen)
     path = ledger_path
     if path.exists():
-        ledger = Ledger(path, dataset_hash=data.sha256, split_hash=split_hash(splits))
+        ledger = Ledger(path, dataset_hash=data.sha256, split_hash=split_hash(splits),
+                        history_ledgers=config.history_ledgers)
         if ledger.identity["kind"] != kind:
             raise ValueError("Real and simulated campaigns cannot share a ledger")
     else:
         ledger = Ledger.initialize(path, dataset_hash=data.sha256,
-                                   split_hash=split_hash(splits), kind=kind)
+                                   split_hash=split_hash(splits), kind=kind,
+                                   history_ledgers=config.history_ledgers)
     return data, splits, ledger
 
 

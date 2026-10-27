@@ -45,7 +45,9 @@ python -m autonomis reconcile --confirm-no-active-worker
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
 - `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
-Generated state is under `campaigns/reference/` and ignored by Git. Never delete or replace an active campaign ledger to obtain more fits. Preserve the full directory between runs and keep the friend's machine as its single training authority.
+Generated state is under `campaigns/reference/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign ledgers, including archived campaign folders. The configured `history_ledgers` also imports the previously recorded parent-project runs. If either history source is missing, conflicting, or inaccessible, real ledger setup fails closed. Never delete or replace a ledger to obtain more fits; preserve campaign ledgers and the historical sources together.
+
+The configured history contains 26 prior recorded fits (15 active and 11 archived in the parent project). Until the organizer confirms an exemption or grants a new allocation, the shared counter treats all 26 as consumed and refuses additional real attempts. The 15-attempt cap applies across campaigns; a new ledger does not create a new allowance.
 
 ## Training is disabled here
 

@@ -20,7 +20,7 @@ from autonomis.training import gpu_preflight
 def _open_ledger(config):
     frozen = read_json(config.output_dir / "campaign.json")
     return Ledger(config.output_dir / "ledger.sqlite", dataset_hash=config.expected_sha256,
-                  split_hash=frozen["split_hash"])
+                  split_hash=frozen["split_hash"], history_ledgers=config.history_ledgers)
 
 
 def main(argv=None):
