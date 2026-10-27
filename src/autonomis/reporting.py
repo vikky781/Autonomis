@@ -5,6 +5,16 @@ import math
 from pathlib import Path
 
 ATTEMPT_BUDGET = 15
+PHASES = (
+    ("search", 11, "Explore candidate recipes",
+     "Train on the Search partition and use its validation results to guide the next proposal."),
+    ("probe", 2, "Compare finalists",
+     "Optional paired checks compare close finalists on the same additional split."),
+    ("audit", 1, "Evaluate the Audit proxy",
+     "Evaluate the selected proxy on the held-out Audit partition after selection is frozen."),
+    ("final", 1, "Fit the submission candidate",
+     "Fit the selected recipe on all labelled development rows; this fit has no local holdout score."),
+)
 
 
 def _text(value, fallback="unavailable"):
@@ -53,20 +63,120 @@ def _svg_polyline(points, *, label, stroke, css_class, viewbox="0 0 720 230"):
     )
 
 
-def _budget_chart(rows):
-    if not rows:
-        return '<p class="empty-note">Budget stays untouched until an experiment is recorded.</p>'
-    attempts = len(rows)
-    points = []
-    for index in range(1, attempts + 1):
-        x = 54 + index * 636 / max(1, ATTEMPT_BUDGET)
-        y = 190 - index * 166 / ATTEMPT_BUDGET
-        points.append((x, y))
-    remaining = ATTEMPT_BUDGET - attempts
-    chart = _svg_polyline(points, label="Training attempts consumed toward the 15-attempt limit",
-                          stroke="var(--signal)", css_class="budget-trajectory")
-    return (chart + f'<p class="chart-caption">{attempts} used · {remaining} remain · '
-            f'limit {ATTEMPT_BUDGET}</p>')
+def _budget_chart(used):
+    bounded = min(max(int(used), 0), ATTEMPT_BUDGET)
+    remaining = max(0, ATTEMPT_BUDGET - bounded)
+    percent = round(100 * bounded / ATTEMPT_BUDGET)
+    return (
+        '<div class="budget-track" role="progressbar" '
+        'aria-label="Shared training attempt budget" aria-valuemin="0" '
+        f'aria-valuemax="{ATTEMPT_BUDGET}" aria-valuenow="{bounded}">'
+        f'<span class="budget-fill" style="width:{percent}%"></span></div>'
+        f'<p class="chart-caption"><strong>{bounded} of {ATTEMPT_BUDGET} used</strong> · '
+        f'{remaining} remain. Reserved and failed attempts count.</p>'
+    )
+
+
+def _campaign_story(rows, phase_counts, *, audit_lock, frozen, selection):
+    active = next((row for row in reversed(rows)
+                   if row["status"] in {"reserved", "running"}), None)
+    if audit_lock:
+        return (
+            "Audit is locked",
+            "The selected model identities and Audit predictions are frozen. The campaign "
+            "cannot run more training attempts.",
+        )
+    if active:
+        phase = active["phase"]
+        label = dict((key, title) for key, _, title, _ in PHASES).get(phase, phase.title())
+        return (
+            f"{label} is running",
+            f"Attempt {active['id']} is reserved or running. It remains charged to the shared "
+            "15-attempt budget, even if the worker fails.",
+        )
+    latest = rows[-1] if rows else None
+    if latest and latest["status"] in {"failed", "interrupted"}:
+        return (
+            f"Attempt {latest['id']} needs review",
+            f"The latest {latest['phase']} attempt ended {latest['status']} and remains charged "
+            "to the budget. Review its recorded error before explaining the next decision.",
+        )
+    if selection:
+        return (
+            "Selection is ready for Audit",
+            "The submission candidate and Audit proxy are selected. Audit metrics should only "
+            "be read after their identities are locked.",
+        )
+    if frozen:
+        if phase_counts.get("audit", 0) == 0:
+            return (
+                "Audit proxy is next",
+                "The winning recipe is frozen. The next terminal step evaluates its Audit proxy "
+                "on the held-out Audit partition.",
+            )
+        if phase_counts.get("final", 0) == 0:
+            return (
+                "Final model is next",
+                "The Audit-phase attempt is recorded. The final candidate is fitted on all "
+                "labelled development rows and has no local holdout score.",
+            )
+        return (
+            "Campaign needs review",
+            "Terminal attempts are recorded but the Audit lock is not present. Review the "
+            "saved campaign evidence before continuing.",
+        )
+    if phase_counts.get("search", 0):
+        return (
+            "Adaptive Search",
+            "The planner uses saved Search results to select the next eligible recipe. Optional "
+            "paired finalist checks are only used when their comparison criteria are met.",
+        )
+    return (
+        "Ready to compare models",
+        "No model attempts are recorded yet. The campaign starts with Search; profiling and "
+        "this read-only report do not use training attempts.",
+    )
+
+
+def _phase_cards(phase_counts, *, audit_lock, frozen):
+    cards = []
+    audit_count = phase_counts.get("audit", 0)
+    final_count = phase_counts.get("final", 0)
+    for key, maximum, title, explanation in PHASES:
+        used = phase_counts.get(key, 0)
+        if audit_lock:
+            state = "Locked"
+        elif key == "search":
+            state = "Selection frozen" if frozen else "Limit reached" if used >= maximum else "Current phase"
+        elif key == "probe":
+            state = "Closed" if frozen or audit_count else "Optional"
+            if used and not frozen and not audit_count:
+                state = "In progress"
+            elif used and (frozen or audit_count) and used < maximum:
+                state = "Closed with unused slots"
+        elif key == "audit":
+            state = "Attempt recorded" if audit_count else "Next" if frozen else "After selection"
+        else:
+            state = "Attempt recorded" if final_count else "Next" if audit_count else "After Audit"
+        percent = round(100 * min(used, maximum) / maximum)
+        closed = state in {
+            "Locked", "Selection frozen", "Limit reached", "Closed",
+            "Closed with unused slots", "Attempt recorded",
+        }
+        slot_label = "unspent" if closed and maximum > used else "slot(s) remain"
+        cards.append(f"""
+          <article class="phase-card phase-{_text(key)}">
+            <div class="phase-head"><h3>{_text(title)}</h3>
+              <span class="phase-status">{_text(state)}</span></div>
+            <p>{_text(explanation)}</p>
+            <div class="phase-track" role="progressbar" aria-label="{_text(title)} attempts"
+              aria-valuemin="0" aria-valuemax="{maximum}" aria-valuenow="{min(used, maximum)}">
+              <span style="width:{percent}%"></span></div>
+            <div class="phase-foot"><strong>{min(used, maximum)} / {maximum}</strong>
+              <span>{max(0, maximum - used)} {slot_label}</span></div>
+          </article>
+        """)
+    return "".join(cards)
 
 
 def _search_chart(search_curve):
@@ -150,13 +260,25 @@ def _artifact_panel(summary, audit_lock):
     """
 
 
-def render_report(ledger, destination, *, summary=None):
+def render_report(ledger, destination, *, summary=None, dataset_role=None):
     """Render campaign evidence as a standalone page without mutating the ledger."""
     rows = ledger.attempts()
     used = ledger.used
     remaining = max(0, ATTEMPT_BUDGET - used)
     simulation = ledger.identity["kind"] == "simulation"
     audit_lock = ledger.audit_lock
+    phase_counts = ledger.phase_counts()
+    campaign_dir = Path(ledger.path).parent
+    frozen = (campaign_dir / "frozen-recipe.json").is_file()
+    selection = (campaign_dir / "selection.json").is_file()
+    current_title, current_explanation = _campaign_story(
+        rows, phase_counts, audit_lock=audit_lock, frozen=frozen, selection=selection
+    )
+    phases = _phase_cards(phase_counts, audit_lock=audit_lock, frozen=frozen)
+    data_label = {
+        "public_reference": "Public reference dataset",
+        "official": "Official dataset configured · equivalence not verified",
+    }.get(dataset_role, "Dataset role unavailable")
     mode = (
         '<span class="mode-pill simulation">SIMULATION | fixture outputs, not model performance</span>'
         if simulation else
@@ -182,6 +304,11 @@ def render_report(ledger, destination, *, summary=None):
         reason = details.get("reason", "")
         if details.get("alternatives"):
             reason = f"{reason} ({len(details['alternatives'])} alternatives recorded)"
+        family = {
+            "lr": "Logistic regression",
+            "catboost": "CatBoost",
+            "lightgbm": "LightGBM",
+        }.get(recipe.get("family"), recipe.get("family", "unavailable"))
         metric_text = (
             f"Search ROC-AUC {_metric(auc)} · AP {_metric(ap)}" if phase == "search" and auc is not None else
             f"Probe ROC-AUC {_metric(auc)} · AP {_metric(ap)}" if phase == "probe" and auc is not None else
@@ -198,7 +325,7 @@ def render_report(ledger, destination, *, summary=None):
             <div class="attempt-card">
               <div class="attempt-head">
                 <div><span class="eyebrow">Attempt {attempt_number:02d} · {_text(phase)}</span>
-                  <h3>{_text(recipe.get('family', 'unavailable'))}
+                  <h3>{_text(family)}
                     <span class="backend">{_text(recipe.get('backend', 'unavailable'))}</span></h3></div>
                 <span class="status-pill status-{_text(status)}">{_text(status)}</span>
               </div>
@@ -208,7 +335,7 @@ def render_report(ledger, destination, *, summary=None):
                 <div><dt>Duration</dt><dd>{_text(_seconds(duration))}</dd></div>
                 <div><dt>Tree count</dt><dd>{_text(result.get('tree_count'))}</dd></div>
               </dl>
-              <p class="rationale"><span>Decision</span>{_text(reason, 'No rationale recorded')}</p>
+              <p class="rationale"><span>Why chosen</span>{_text(reason, 'No rationale recorded')}</p>
               {f'<p class="attempt-error">{_text(row["error"])}</p>' if row['error'] else ''}
             </div>
           </article>
@@ -232,6 +359,20 @@ def render_report(ledger, destination, *, summary=None):
         "summary unverified" if summary else "not available"
     )
     artifacts = _artifact_panel(summary, audit_lock)
+    timeline_html = "".join(timeline)
+    if not timeline_html:
+        if used == 0:
+            empty_timeline = (
+                "No experiment attempts have been recorded in this campaign. "
+                "The 15-attempt budget remains untouched; all 15 available attempts remain. "
+                "Profiling and report viewing use zero training attempts."
+            )
+        else:
+            empty_timeline = (
+                "No experiment attempts have been recorded in this campaign ledger. "
+                f"The shared budget has {used} of {ATTEMPT_BUDGET} attempts used by other campaigns."
+            )
+        timeline_html = f'<p class="empty-timeline">{_text(empty_timeline)}</p>'
     if summary and summary.get("hidden_test_score") is not None:
         hidden_test = f"Reported hidden-test score: {_metric(summary['hidden_test_score'])}"
     else:
@@ -291,6 +432,27 @@ def render_report(ledger, destination, *, summary=None):
     .metric-value.compact {{ font-size: clamp(17px, 1.7vw, 23px); letter-spacing: -.04em; }}
     .metric-hint {{ color: var(--muted); font-size: 11px; }}
     .section {{ margin-top: 34px; }}
+    .now-panel {{ display: grid; grid-template-columns: 145px minmax(0, 1fr); gap: 18px;
+      padding: 21px 23px; background: var(--ink); color: #f3f7f4; border-radius: 4px 17px 17px 17px; }}
+    .now-label {{ color: #b7e7d9; font: 700 10px var(--mono); letter-spacing: .12em; text-transform: uppercase; }}
+    .now-panel h2 {{ margin: 4px 0 7px; color: #fff; font-size: 22px; }}
+    .now-panel p {{ margin: 0; max-width: 880px; color: #d1dfda; font-size: 13px; }}
+    .phase-grid {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
+    .phase-card {{ padding: 17px 19px; background: var(--surface); border: 1px solid var(--line);
+      border-radius: 4px 14px 14px 14px; }}
+    .phase-head {{ display: flex; justify-content: space-between; align-items: start; gap: 12px; }}
+    .phase-head h3 {{ margin: 0; font-size: 14px; }}
+    .phase-status {{ flex: none; padding: 4px 8px; color: #165d54; background: var(--soft-signal);
+      border-radius: 999px; font: 700 9px var(--mono); text-transform: uppercase; }}
+    .phase-card p {{ min-height: 38px; margin: 9px 0 13px; color: var(--muted); font-size: 11px; }}
+    .phase-track,.budget-track {{ height: 9px; overflow: hidden; background: #e3ebe7; border-radius: 999px; }}
+    .phase-track span,.budget-fill {{ display: block; height: 100%; background: var(--signal); border-radius: inherit; }}
+    .phase-foot {{ display: flex; justify-content: space-between; gap: 12px; margin-top: 8px;
+      color: var(--muted); font: 10px var(--mono); }}
+    .phase-foot strong {{ color: var(--ink); }}
+    .budget-track {{ margin: 22px 0 15px; }}
+    .data-scope {{ display: inline-flex; padding: 6px 10px; color: #165d54; background: var(--soft-signal);
+      border-radius: 999px; font: 700 10px var(--mono); }}
     .section-head {{ display: flex; align-items: end; justify-content: space-between; gap: 18px;
       margin-bottom: 13px; }}
     .section-head h2 {{ margin: 0; font-size: 20px; letter-spacing: -.025em; }}
@@ -359,7 +521,8 @@ def render_report(ledger, destination, *, summary=None):
       .shell {{ width: min(100% - 28px, 600px); padding-top: 19px; }}
       .hero {{ grid-template-columns: 1fr; padding-top: 25px; }} .mode-pill {{ justify-self: start; }}
       .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
-      .charts,.artifact-grid,.metric-notes {{ grid-template-columns: 1fr; }}
+      .charts,.artifact-grid,.metric-notes,.phase-grid {{ grid-template-columns: 1fr; }}
+      .now-panel {{ grid-template-columns: 1fr; gap: 8px; }}
       .attempt {{ grid-template-columns: 34px minmax(0, 1fr); gap: 8px; }}
       .attempt-marker span {{ width: 29px; height: 29px; }} .attempt-marker::after {{ top: 32px; }}
       .attempt-facts {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
@@ -380,12 +543,18 @@ def render_report(ledger, destination, *, summary=None):
         <p>One auditable view of the runs, evidence, and artifacts behind the churn prediction campaign.</p></div>
       {mode}
     </section>
-    <p class="notice">This page reads saved campaign records only. It does not train or reserve attempts.
-      Official organizer data and submission compatibility remain unverified.</p>
+    <p class="notice">Read-only demo: this page explains saved campaign evidence. It does not train or reserve attempts.
+      Organizer dataset equivalence and submission compatibility must be verified separately.</p>
+    <p class="data-scope">{_text(data_label)}</p>
+    <section class="section now-panel" aria-labelledby="now-title">
+      <div><span class="now-label">What is happening now</span></div>
+      <div><h2 id="now-title">{_text(current_title)}</h2>
+        <p>{_text(current_explanation)}</p></div>
+    </section>
     <section class="metrics" aria-label="Campaign status">
-      <article class="metric-card"><span class="metric-label">Training attempts used</span>
+      <article class="metric-card"><span class="metric-label">Shared attempts used</span>
         <strong class="metric-value">{used} <span>/ 15</span></strong>
-        <span class="metric-hint">Failed and interrupted reservations count.</span></article>
+        <span class="metric-hint">Across campaigns · failed and interrupted reservations count.</span></article>
       <article class="metric-card"><span class="metric-label">Attempts remaining</span>
         <strong class="metric-value">{remaining}</strong><span class="metric-hint">Hard limit across all phases.</span></article>
       <article class="metric-card"><span class="metric-label">Best Search ROC-AUC</span>
@@ -397,14 +566,20 @@ def render_report(ledger, destination, *, summary=None):
         <strong class="metric-value compact">{_text(artifact_status)}</strong>
         <span class="metric-hint">Submission identity and proxy shown below.</span></article>
     </section>
+    <section class="section" aria-labelledby="phases-title">
+      <div class="section-head"><div><span class="eyebrow">Experiment workflow</span>
+        <h2 id="phases-title">What each phase contributes</h2></div>
+        <p>Up to 15 attempts; paired checks are conditional and may be skipped.</p></div>
+      <div class="phase-grid">{phases}</div>
+    </section>
     <section class="section" aria-labelledby="trajectory-title">
       <div class="section-head"><div><span class="eyebrow">Campaign trajectory</span>
         <h2 id="trajectory-title">Budget and Search signal</h2></div>
         <p>Search is exploratory; Audit is a separate sealed evaluation.</p></div>
       <div class="charts">
         <article class="chart-card"><h3>Attempt budget</h3>
-          <p class="subhead">Each recorded fit consumes one of the 15 available attempts.</p>
-          {_budget_chart(rows)}</article>
+          <p class="subhead">The shared budget counts every reservation, including failed attempts.</p>
+          {_budget_chart(used)}</article>
         <article class="chart-card"><h3>Best Search ROC-AUC</h3>
           <p class="subhead">Running best across successful Search attempts; probes remain distinct.</p>
           {_search_chart(search_curve)}</article>
@@ -415,26 +590,25 @@ def render_report(ledger, destination, *, summary=None):
         <h2 id="evidence-title">Three different score contexts</h2></div></div>
       <div class="metric-notes">
         <article class="metric-note search-note"><h3>Search metrics</h3>
-          <p>Recorded on the Search validation partition to select a recipe. These values describe candidate fits.</p></article>
+          <p>ROC-AUC summarizes ranking across thresholds. Average Precision summarizes precision as recall rises; compare it with churn prevalence. Both are Search selection evidence, not hidden-test results.</p></article>
         <article class="metric-note audit-note"><h3>Audit proxy metrics</h3>
-          <p>{_text(audit_text)}. The score belongs to the identified Audit proxy, not automatically to the final artifact.</p></article>
+          <p>{_text(audit_text)}. These metrics belong to the identified Audit proxy, not automatically to a full-data final model.</p></article>
         <article class="metric-note hidden-note"><h3>Hidden-test metrics</h3>
           <p>{_text(hidden_test)}. No hidden-test score or Efficiency Factor is inferred here.</p></article>
       </div>
     </section>
     <section class="section" aria-labelledby="timeline-title">
       <div class="section-head"><div><span class="eyebrow">Immutable ledger order</span>
-        <h2 id="timeline-title">Experiment timeline</h2></div>
-        <p>{len(rows)} recorded attempt(s) · ordered by ledger ID</p></div>
-      <div class="timeline">{''.join(timeline) if timeline else
-        '<p class="empty-timeline">No experiment attempts have been recorded. The 15-attempt budget remains untouched.</p>'}</div>
+        <h2 id="timeline-title">Why each experiment was run</h2></div>
+        <p>{len(rows)} in this campaign · {used} across the shared budget · ordered by ledger ID</p></div>
+      <div class="timeline">{timeline_html}</div>
     </section>
     <section class="section artifact-panel" aria-labelledby="artifact-title">
       <span class="eyebrow">Frozen terminal roles</span><h2 id="artifact-title">Locked artifacts</h2>
       {artifacts}
     </section>
     <footer><span>Autonomis · derived from local campaign records</span>
-      <span>Public IBM reference is not verified organizer data | Efficiency Factor undefined</span></footer>
+      <span>Organizer equivalence and output-schema compatibility are not inferred from this report.</span></footer>
   </main>
 </body>
 </html>"""

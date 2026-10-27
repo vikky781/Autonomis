@@ -15,6 +15,7 @@ from autonomis.predict import OutputContract, export_predictions, predict_bundle
 from autonomis.reporting import render_report
 from autonomis.storage import read_json
 from autonomis.training import gpu_preflight
+from autonomis.web import serve_report
 
 
 def _open_ledger(config):
@@ -29,6 +30,9 @@ def main(argv=None):
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("profile", "prepare", "preflight", "status", "plan", "report"):
         commands.add_parser(name)
+    website = commands.add_parser("serve", help="Serve the read-only campaign demo on localhost")
+    website.add_argument("--host", default="127.0.0.1")
+    website.add_argument("--port", default=8502, type=int)
     reconcile = commands.add_parser("reconcile", help="Mark a verified stopped worker interrupted")
     reconcile.add_argument("--confirm-no-active-worker", action="store_true",
                            help="Required operator confirmation before changing ledger state")
@@ -74,6 +78,11 @@ def main(argv=None):
             ledger.reconcile_interrupted(confirm_no_active_worker=args.confirm_no_active_worker)
             value = {"interrupted": True, "attempts_used": ledger.used,
                      "remaining": ledger.remaining}
+        elif args.command == "serve":
+            ledger = _open_ledger(config)
+            serve_report(ledger, config.output_dir, dataset_role=config.dataset_role,
+                         host=args.host, port=args.port)
+            return 0
         else:
             ledger = _open_ledger(config)
             value = {"attempts_used": ledger.used, "remaining": ledger.remaining,
@@ -106,7 +115,8 @@ def main(argv=None):
             elif args.command == "report":
                 summary = config.output_dir / "summary.json"
                 path = render_report(ledger, config.output_dir / "report.html",
-                                     summary=read_json(summary) if summary.exists() else None)
+                                     summary=read_json(summary) if summary.exists() else None,
+                                     dataset_role=config.dataset_role)
                 value["report"] = str(path)
         print(json.dumps(value, indent=2, allow_nan=False))
         return 0

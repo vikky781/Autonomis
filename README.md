@@ -33,6 +33,7 @@ python -m autonomis preflight
 python -m autonomis status
 python -m autonomis plan
 python -m autonomis report
+python -m autonomis serve
 # after verifying a worker has stopped:
 python -m autonomis reconcile --confirm-no-active-worker
 ```
@@ -43,11 +44,14 @@ python -m autonomis reconcile --confirm-no-active-worker
 - `status` reads the consumed/remaining budget and audit-lock state.
 - `plan` prints the next proposed recipe and rationale without reserving or running it.
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
+- `serve` hosts the judge-facing report on `http://127.0.0.1:8502`. It refreshes its view from saved evidence on each page load and never trains or reserves attempts. Run `prepare` once first to create the empty campaign ledger.
 - `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
-Generated state is under `campaigns/reference/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign ledgers, including archived campaign folders. The configured `history_ledgers` also imports the previously recorded parent-project runs. If either history source is missing, conflicting, or inaccessible, real ledger setup fails closed. Never delete or replace a ledger to obtain more fits; preserve campaign ledgers and the historical sources together.
+The browser demo is generated from the campaign ledger and uses Python's standard-library HTTP server. It needs no GPU, JavaScript build, or extra web package. The dashboard shows the current phase and why the next step follows, while retaining detailed run cards and a clear separation between Search, Audit-proxy, final-fit, and hidden-test evidence.
 
-The configured history contains 26 prior recorded fits (15 active and 11 archived in the parent project). Until the organizer confirms an exemption or grants a new allocation, the shared counter treats all 26 as consumed and refuses additional real attempts. The 15-attempt cap applies across campaigns; a new ledger does not create a new allowance.
+Generated state is under `campaigns/reference/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign ledgers, including archived campaign folders. Optional `history_ledgers` can import external historical runs; configured sources must remain available or ledger setup fails closed. Never delete or replace a ledger to obtain more fits.
+
+The local generated run records and model artifacts were cleared for a fresh workspace start. The local attempt counter now starts at zero and allows at most 15 newly recorded attempts. Clearing local files does not change any attempt allocation maintained by the organizer; confirm the applicable allowance before real training.
 
 ## Training is disabled here
 

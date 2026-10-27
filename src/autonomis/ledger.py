@@ -189,6 +189,20 @@ class Ledger:
     def remaining(self):
         return max(0, 15 - self.used)
 
+    def phase_counts(self):
+        """Return attempt counts by phase across the shared real-campaign budget."""
+        if self.identity["kind"] != "real":
+            counts = {}
+            for row in self.attempts():
+                counts[row["phase"]] = counts.get(row["phase"], 0) + 1
+            return counts
+        with self._budget_db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            self._sync_budget(db)
+            return {row["phase"]: row["count"] for row in db.execute(
+                "SELECT phase, COUNT(*) AS count FROM attempts GROUP BY phase"
+            )}
+
     @property
     def audit_lock(self):
         if self.identity["kind"] == "real":
