@@ -5,17 +5,17 @@ Plan: docs/superpowers/plans/2026-10-26-autonomous-ai-data-scientist-v2.md
 ## Binding execution constraints
 
 - Work directly on main; commit each created or modified file separately; push main.
-- Never train a predictive model on this development PC, including CPU baselines or smoke tests.
-- GPU integration is explicitly authorized for implementation. Do not execute predictive training in development; native GPU preflight/fitting verification belongs on the authorized laptop.
-- Verify data handling, preprocessing, persistence, GPU parameter selection and orchestration with synthetic fixtures, mocked hardware queries and fake training workers only.
+- The user has enabled training from any machine; there is no hostname allowlist. The dashboard binds to loopback by default, and CLI training requires `--execute`.
+- Preserve the common hard 15-attempt budget across all real campaign ledgers, including failures and interrupted work.
+- Use fixtures and mocks for no-training development checks; real fits are started only through the explicit dashboard or CLI action and consume the shared ledger.
 
 ## Rulings
 
-- Ruling: defer the plan's real baseline/campaign execution to the friend's laptop. The user explicitly forbids all training here. Consequently no trained artifact or empirical AUC can be delivered in this pass.
+- Ruling: training may be started from any machine with the project configured and the required packages installed. No training was started during this implementation pass.
 - Ruling: keep one checkout on main, as explicitly requested; do not create a feature branch/worktree.
 - Ruling: replace platform-specific execution-skill bookkeeping scripts with this persistent status document on Windows. Commit history and test outputs are the execution record.
-- Ruling: use a fresh Python 3.12 virtual environment, not the bundled/shared runtime. Native estimator packages remain optional for no-training development; the CatBoost GPU extra is declared but native installation/execution is deferred to the authorized laptop.
-- Pre-flight: data/splits -> features -> CPU/CatBoost-GPU adapters; recipe/result contracts -> planner/ledger -> runner/campaign; artifacts -> inference/reporting. Training permission is checked before reservation, process startup or estimator construction.
+- Ruling: use a fresh Python 3.12 virtual environment, not the bundled/shared runtime. Native estimator packages remain optional; the CatBoost GPU extra is declared.
+- Pre-flight: data/splits -> features -> CPU/CatBoost-GPU adapters; recipe/result contracts -> planner/ledger -> runner/campaign; artifacts -> inference/reporting. The configured enable switch is checked before reservation, process startup or estimator construction.
 
 ## Progress
 
@@ -24,7 +24,7 @@ Plan: docs/superpowers/plans/2026-10-26-autonomous-ai-data-scientist-v2.md
   train-only preprocessing, deterministic feedback planner, persistent budget ledger, guarded
   CPU/GPU adapter definitions, supervised workers, A/P/F finalization, verified bundles/exports,
   read-only evidence reporting and CLI.
-- Real CPU/GPU baseline/campaign execution is intentionally deferred to the authorized training laptop.
+- Real CPU/GPU baseline/campaign execution has not been performed in this workspace.
   Native CatBoost/LightGBM dependencies and native fitted-model round-trips were not verified here.
 - No predictive model fits have run. Test artifacts contain static, non-learning response fixtures.
 - CatBoost GPU integration is implemented: a backend-specific frozen recipe profile, planner/backend
@@ -49,8 +49,7 @@ Plan: docs/superpowers/plans/2026-10-26-autonomous-ai-data-scientist-v2.md
 
 ## Handoff
 
-Keep training disabled on this PC. On the authorized training machine, verify native package/driver
-compatibility with `preflight` after the final dataset/submission checks. The 7,043-row public reference
+Verify native package/driver compatibility with `preflight` after the final dataset/submission checks. The 7,043-row public reference
 does not pass the declared >50,000-row GPU gate and must retain the CPU backend. Any real native smoke
 fit consumes the common ledger budget; native GPU execution and artifact round-trips remain to be
 verified. Public IBM input equivalence to organizer files is still unconfirmed.

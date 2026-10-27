@@ -1,4 +1,4 @@
-"""Strict campaign configuration; training remains opt-in on a named host."""
+"""Strict campaign configuration with an explicit training enable switch."""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +33,7 @@ def load_config(path):
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     required = {"dataset", "dataset_role", "expected_sha256", "output_dir", "history_ledgers", "budget",
                 "search_limit", "probe_limit", "seed", "threads", "timeout_seconds",
-                "exploration_seconds", "terminal_seconds", "enable_training", "training_host",
+                "exploration_seconds", "terminal_seconds", "enable_training",
                 "backend", "feature_ablation", "official_submission"}
     if not isinstance(raw, dict) or set(raw) != required:
         raise ValueError("Configuration has missing or unknown keys")
@@ -63,11 +63,8 @@ def load_config(path):
                    for item in raw["history_ledgers"])):
         raise ValueError("history_ledgers must be a list of paths")
     history_ledgers = tuple((root / item).resolve() for item in raw["history_ledgers"])
-    host = raw["training_host"]
-    if host is not None and (not isinstance(host, str) or not host.strip()):
-        raise ValueError("Invalid training host")
     return Config(root, (root / raw["dataset"]).resolve(), output, history_ledgers, raw["dataset_role"],
                   digest, raw["seed"], raw["threads"], raw["timeout_seconds"],
                   raw["exploration_seconds"], raw["terminal_seconds"],
                   raw["feature_ablation"], raw["official_submission"], raw["backend"],
-                  TrainingPermit(raw["enable_training"], host))
+                  TrainingPermit(raw["enable_training"]))

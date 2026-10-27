@@ -11,8 +11,7 @@ threads: 4
 timeout_seconds: 1800
 exploration_seconds: 28800
 terminal_seconds: 36000
-enable_training: false
-training_host: null
+enable_training: true
 backend: cpu
 feature_ablation: true
 official_submission: false

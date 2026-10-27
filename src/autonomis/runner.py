@@ -1,4 +1,4 @@
-"""Supervise one authorized worker; failures and timeouts never refund reservations."""
+"""Supervise one explicitly requested worker; failures never refund reservations."""
 
 import multiprocessing
 import time
@@ -46,7 +46,7 @@ def run_attempt(ledger, recipe, phase, membership_hash, job, *, output_dir,
         destination = folder / "worker-result.json"
         payload = {**job, "recipe": recipe.to_dict(), "phase": phase,
                    "attempt_id": attempt_id, "artifact_dir": str(folder / "artifact"),
-                   "permit": {"enabled": permit.enabled, "training_host": permit.training_host}}
+                   "permit": {"enabled": permit.enabled}}
         context = multiprocessing.get_context("spawn")
         start_event = context.Event()
         process = context.Process(target=_worker_entry,

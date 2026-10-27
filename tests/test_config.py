@@ -3,19 +3,17 @@ from pathlib import Path
 import pytest
 
 from autonomis.config import load_config
-from autonomis.contracts import TrainingDisabled
 
 
-def test_default_config_cannot_authorize_training():
+def test_default_config_allows_explicit_training_actions():
     config = load_config("configs/campaign.yaml")
     assert config.dataset.is_file()
     assert config.dataset_role == "public_reference"
     assert config.backend == "cpu"
-    with pytest.raises(TrainingDisabled):
-        config.permit.check()
+    config.permit.check()
 
 
-def test_gpu_config_is_valid_but_does_not_authorize_training(tmp_path):
+def test_gpu_config_is_valid_without_host_binding(tmp_path):
     folder = tmp_path / "configs"
     folder.mkdir()
     original = Path("configs/campaign.yaml").read_text()
@@ -23,8 +21,7 @@ def test_gpu_config_is_valid_but_does_not_authorize_training(tmp_path):
     path.write_text(original.replace("backend: cpu", "backend: gpu"))
     config = load_config(path)
     assert config.backend == "gpu"
-    with pytest.raises(TrainingDisabled):
-        config.permit.check()
+    config.permit.check()
 
 
 @pytest.mark.parametrize("change", ["budget: 16", "backend: tpu", "threads: 0",

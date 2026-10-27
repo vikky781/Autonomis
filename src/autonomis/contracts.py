@@ -3,7 +3,6 @@
 import hashlib
 import json
 import math
-import socket
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -134,8 +133,7 @@ class TrainingDisabled(RuntimeError):
 @dataclass(frozen=True)
 class TrainingPermit:
     enabled: bool = False
-    training_host: str | None = None
 
     def check(self):
-        if self.enabled is not True or self.training_host != socket.gethostname():
-            raise TrainingDisabled("Training is disabled on this host; use the authorized laptop")
+        if self.enabled is not True:
+            raise TrainingDisabled("Training is disabled in the campaign configuration")

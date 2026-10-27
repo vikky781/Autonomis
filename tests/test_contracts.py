@@ -1,5 +1,3 @@
-import socket
-
 import pytest
 
 from autonomis.contracts import Recipe, TrainingDisabled, TrainingPermit
@@ -33,11 +31,10 @@ def test_gpu_is_rejected_for_other_families_and_cpu_only_parameters():
         Recipe("catboost", {"bootstrap_type": "Bayesian"}, backend="gpu")
 
 
-def test_training_requires_explicit_permission_on_named_host():
-    for permit in (TrainingPermit(), TrainingPermit(True, "different-host")):
-        with pytest.raises(TrainingDisabled):
-            permit.check()
-    TrainingPermit(True, socket.gethostname()).check()
+def test_training_permission_is_not_bound_to_a_hostname():
+    with pytest.raises(TrainingDisabled):
+        TrainingPermit().check()
+    TrainingPermit(True).check()
 
 
 @pytest.mark.parametrize("params", [{"C": float("nan")}, {"C": -1}, {"unexpected": 1}])

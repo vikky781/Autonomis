@@ -25,7 +25,7 @@ flowchart LR
 - Split manifest: source fingerprint plus disjoint Train/Search/Audit memberships and one development-only paired split. No seed shopping or file overwrite.
 - Observation: one numbered attempt, recipe, phase, actual scores/timings/tree count and persisted artifact reference. Search/probe/audit metrics are never pooled.
 - Ledger: SQLite single writer, atomic irreversible reservations, explicit phases, one active worker, 15 global attempts, two reserved terminal fits, and immutable final audit identities.
-- Worker: training permission must be explicitly enabled for the configured host before reservation or estimator construction. Defaults refuse training everywhere. GPU mode additionally requires the dataset/package/driver/device/free-VRAM preflight and never silently retries on CPU.
+- Worker: the campaign configuration controls whether training is enabled; no hostname allowlist is used. Dashboard runs require a local button click and confirmation, and CLI runs require `--execute`. GPU mode additionally requires the dataset/package/driver/device/free-VRAM preflight and never silently retries on CPU.
 - Finalization: verify cached fallback, development-trained audit proxy and full-data model; choose artifacts by technical success before releasing audit metrics.
 - Inference/reporting: consume saved artifacts/results only. Later exports append input/contract/output hashes to the locked model identity.
 

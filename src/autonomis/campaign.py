@@ -1,7 +1,6 @@
-"""Sequential CPU/GPU orchestration; execution requires the named training authority."""
+"""Sequential CPU/GPU orchestration under the shared campaign attempt budget."""
 
 import importlib.util
-import socket
 import time
 from pathlib import Path
 
@@ -68,7 +67,7 @@ def observations(ledger, phase="search"):
 
 
 def run_single_search_attempt(config, family):
-    """Run exactly one authorized Search attempt for a chosen model family."""
+    """Run exactly one explicitly requested Search attempt for a chosen model family."""
     config.permit.check()
     if family not in {"lr", "catboost", "lightgbm"}:
         raise ValueError("Choose Logistic Regression, CatBoost, or LightGBM")
@@ -93,13 +92,12 @@ def run_single_search_attempt(config, family):
     runtime_path = config.output_dir / "runtime.json"
     if runtime_path.exists():
         runtime = read_json(runtime_path)
-        if (runtime["host"] != socket.gethostname() or runtime["backend"] != config.backend
-                or runtime["families"] != list(available)):
-            raise ValueError("Training host, backend, or supported families changed on resume")
+        if runtime["backend"] != config.backend or runtime["families"] != list(available):
+            raise ValueError("Configured backend or supported families changed on resume")
     else:
         if ledger.used:
             raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
-        runtime = {"host": socket.gethostname(), "families": list(available),
+        runtime = {"families": list(available),
                    "backend": config.backend, "started_at": time.time()}
         write_json(runtime_path, runtime)
     if family not in runtime["families"]:
@@ -205,13 +203,13 @@ def run_campaign(config, *, kind="real", families=None):
     runtime_path = config.output_dir / "runtime.json"
     if runtime_path.exists():
         runtime = read_json(runtime_path)
-        if (runtime["host"] != socket.gethostname() or runtime["families"] != list(available)
+        if (runtime["families"] != list(available)
                 or runtime.get("backend") != config.backend):
-            raise ValueError("Training host, backend, or supported families changed on resume")
+            raise ValueError("Configured backend or supported families changed on resume")
     else:
         if ledger.used:
             raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
-        runtime = {"host": socket.gethostname(), "families": list(available),
+        runtime = {"families": list(available),
                    "backend": config.backend, "started_at": time.time()}
         write_json(runtime_path, runtime)
     exploration_deadline = runtime["started_at"] + config.exploration_seconds

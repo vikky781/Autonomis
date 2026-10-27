@@ -11,7 +11,8 @@ from autonomis.reporting import render_report
 def configuration(tmp_path):
     raw = yaml.safe_load(Path("configs/campaign.yaml").read_text())
     raw["dataset"] = str(Path(raw["dataset"]).resolve())
-    raw["output_dir"] = "campaign"
+    raw["output_dir"] = "campaigns/campaign"
+    raw["enable_training"] = False
     path = tmp_path / "configs" / "campaign.yaml"
     path.parent.mkdir()
     path.write_text(yaml.safe_dump(raw))
@@ -40,7 +41,7 @@ def test_training_is_refused_even_with_execute_flag(tmp_path, capsys):
     prefix = configuration(tmp_path)
     assert main([*prefix, "train", "--execute"]) == 2
     assert "Training is disabled" in capsys.readouterr().err
-    assert not (tmp_path / "campaign").exists()
+    assert not (tmp_path / "campaigns" / "campaign").exists()
 
 
 def test_reconcile_requires_explicit_operator_confirmation(tmp_path, capsys):
@@ -72,7 +73,7 @@ def test_report_zero_attempts_shows_empty_read_only_dashboard(tmp_path):
     content = render_report(ledger, tmp_path / "empty.html").read_text()
 
     assert "Autonomis" in content
-    assert "0 <span>/ 15</span>" in content
+    assert '<span id="shared-attempts-used">0</span> <span>/ 15</span>' in content
     assert "15 available" in content
     assert "No Search results recorded" in content
     assert "No experiment attempts have been recorded" in content
@@ -127,7 +128,7 @@ def test_report_separates_search_audit_and_hidden_test_evidence(tmp_path):
     assert "450" in content and "12.50 s" in content
     assert "Depth trial from anchor" in content
     assert "locked" in content.lower()
-    assert "budget-trajectory" in content and "search-trajectory" in content
+    assert "shared-budget-bar" in content and "search-trajectory" in content
     assert "SIMULATION" not in content
 
 

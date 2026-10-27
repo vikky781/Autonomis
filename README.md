@@ -2,7 +2,7 @@
 
 Budget-constrained customer churn experimentation for Utkrishta 2026. The controller proposes experiments from prior development results, with a persistent maximum of 15 training attempts.
 
-**Current boundary:** guarded CPU and CatBoost GPU execution paths are implemented. No predictive model has been trained on the development PC. Real fitting, native-model round-trips and GPU execution have not been verified here. Tests use non-learning fixtures and mocked GPU inspection; their scores are not measured model performance.
+**Current boundary:** CPU and CatBoost GPU execution paths are implemented. No predictive model has been trained in this workspace. The local dashboard and CLI allow an explicit training action on any machine where the project and its required packages are available. Native-model round-trips and GPU execution still need verification. Test fixtures do not represent measured model performance.
 
 ## Safe local setup
 
@@ -44,7 +44,7 @@ python -m autonomis reconcile --confirm-no-active-worker
 - `status` reads the consumed/remaining budget and audit-lock state.
 - `plan` prints the next proposed recipe and rationale without reserving or running it.
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
-- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It refreshes from saved evidence and shows two explicit controls: one manually selected Search fit, or the sequential campaign runner (up to 15 shared attempts). Both controls remain disabled unless `enable_training: true` and `training_host` exactly matches the current machine; the sequential runner may stop early when phase gates or runtime deadlines require it. Run `prepare` once first to create the empty campaign ledger.
+- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It shows two explicit controls: one manually selected Search fit, or the sequential campaign runner (up to 15 shared attempts). Training is enabled in the checked-in campaign config and is not tied to a particular machine. The sequential runner may stop early when phase gates or runtime deadlines require it. Run `prepare` once first to create the empty campaign ledger.
 - `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
 The browser demo is generated from the campaign ledger and uses Python's standard-library HTTP server. It needs no GPU, JavaScript build, or extra web package. The dashboard shows the current phase and why the next step follows, while retaining detailed run cards and a clear separation between Search, Audit-proxy, final-fit, and hidden-test evidence.
@@ -53,32 +53,30 @@ Generated state is under `campaigns/reference/` and ignored by Git. A shared bud
 
 The local generated run records and model artifacts were cleared for a fresh workspace start. The local attempt counter now starts at zero and allows at most 15 newly recorded attempts. Clearing local files does not change any attempt allocation maintained by the organizer; confirm the applicable allowance before real training.
 
-## Training is disabled here
+## Starting training
 
-`configs/campaign.yaml` has `enable_training: false` and `training_host: null`. The training gateway checks both explicit permission and an exact host match before reservation, process startup or estimator construction. The CLI additionally requires `--execute`. A default-config invocation is rejected and consumes nothing:
+`configs/campaign.yaml` has `enable_training: true`. The dashboard offers one manually selected Search fit or the complete sequential campaign. The CLI still requires the explicit `--execute` flag:
 
 ```bash
 python -m autonomis train --execute
 ```
 
-**Do not enable training or run a baseline on the development PC.** The user's explicit instruction is to defer all real fitting to the friend's laptop. No training command has been used successfully in development.
-
-Adapters are isolated in `training.py`, selected only after permission checks, and optional native dependencies are declared in the `cpu` and `gpu` extras. They are not installed by the safe setup above. Model-library installation and real fitting verification belong on the training laptop.
+Training can run from any machine using this project. The dashboard binds to loopback by default; each action requires a button click and confirmation. Every reservation, including failed or interrupted work, consumes one of the same 15 shared attempts. Adapters are isolated in `training.py`; CatBoost and LightGBM are optional packages declared in the `cpu` and `gpu` extras.
 
 ## CatBoost GPU profile
 
 GPU mode is opt-in with `backend: gpu` and changes only CatBoost; Logistic Regression and LightGBM remain on CPU. It uses the frozen recipe profile from the plan: device 0, GPU RAM fraction 0.75, Plain boosting, border count 128 and maximum CTR complexity 2. Backend and resolved parameters are part of recipe/artifact identity. No automatic CPU retry or backend switch occurs after a reserved GPU attempt fails.
 
-Before the first GPU attempt, preflight requires more than 50,000 labelled rows, CatBoost from the supported `gpu` extra, visible NVIDIA device 0 with driver information, and at least 6,144 MiB free VRAM. The 7,043-row IBM reference therefore remains a CPU campaign. Preflight does not train and does not prove native GPU fitting/serialization compatibility. Any native smoke fit on campaign data is a counted experiment and must run only on the authorized laptop. CatBoost GPU retraining is not promised to be bitwise deterministic.
+Before the first GPU attempt, preflight requires more than 50,000 labelled rows, CatBoost from the supported `gpu` extra, visible NVIDIA device 0 with driver information, and at least 6,144 MiB free VRAM. The 7,043-row IBM reference therefore remains a CPU campaign. Preflight does not train and does not prove native GPU fitting/serialization compatibility. CatBoost GPU retraining is not promised to be bitwise deterministic.
 
-On the authorized laptop, after verifying the accepted dataset and local package/driver compatibility, install the native extras in its isolated environment and run the read-only check:
+After verifying the accepted dataset and local package/driver compatibility, install the desired native extras in the isolated environment and run the read-only check:
 
 ```bash
 python -m pip install -e '.[cpu,gpu]'
 python -m autonomis preflight
 ```
 
-Keep `enable_training: false` during setup/preflight. Select `backend: gpu` before the campaign starts only when its data gate is met; backend changes are rejected on resume.
+Select `backend: gpu` before the campaign starts only when its data gate is met; backend changes are rejected on resume.
 
 ## Experiment protocol
 

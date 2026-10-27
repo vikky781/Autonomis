@@ -68,12 +68,13 @@ def _budget_chart(used):
     remaining = max(0, ATTEMPT_BUDGET - bounded)
     percent = round(100 * bounded / ATTEMPT_BUDGET)
     return (
-        '<div class="budget-track" role="progressbar" '
+        '<div id="shared-budget-bar" class="budget-track" role="progressbar" '
         'aria-label="Shared training attempt budget" aria-valuemin="0" '
         f'aria-valuemax="{ATTEMPT_BUDGET}" aria-valuenow="{bounded}">'
-        f'<span class="budget-fill" style="width:{percent}%"></span></div>'
-        f'<p class="chart-caption"><strong>{bounded} of {ATTEMPT_BUDGET} used</strong> · '
-        f'{remaining} remain. Reserved and failed attempts count.</p>'
+        f'<span id="shared-budget-fill" class="budget-fill" style="width:{percent}%"></span></div>'
+        f'<p class="chart-caption"><strong id="shared-budget-label">{bounded} of '
+        f'{ATTEMPT_BUDGET} used</strong> · <span id="shared-budget-remaining">{remaining} '
+        f'remain</span>. Reserved and failed attempts count.</p>'
     )
 
 
@@ -169,11 +170,11 @@ def _phase_cards(phase_counts, *, audit_lock, frozen):
             <div class="phase-head"><h3>{_text(title)}</h3>
               <span class="phase-status">{_text(state)}</span></div>
             <p>{_text(explanation)}</p>
-            <div class="phase-track" role="progressbar" aria-label="{_text(title)} attempts"
+            <div id="phase-track-{_text(key)}" class="phase-track" role="progressbar" aria-label="{_text(title)} attempts"
               aria-valuemin="0" aria-valuemax="{maximum}" aria-valuenow="{min(used, maximum)}">
-              <span style="width:{percent}%"></span></div>
-            <div class="phase-foot"><strong>{min(used, maximum)} / {maximum}</strong>
-              <span>{max(0, maximum - used)} {slot_label}</span></div>
+              <span id="phase-fill-{_text(key)}" style="width:{percent}%"></span></div>
+            <div class="phase-foot"><strong><span id="phase-count-{_text(key)}">{min(used, maximum)}</span> / {maximum}</strong>
+              <span><span id="phase-remaining-{_text(key)}">{max(0, maximum - used)}</span> {slot_label}</span></div>
           </article>
         """)
     return "".join(cards)
@@ -389,9 +390,9 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
         </article>
       </div>
       <p id="training-state" class="training-state" role="status" aria-live="polite">
-        Checking training authorization…</p>
-      <p class="training-caution">Training is available only when this machine matches the explicitly configured training host.
-        Failed or interrupted reservations still count. Do not close the server while a worker is active.</p>
+        Checking training controls…</p>
+      <p class="training-caution">Training starts only after you choose an action and confirm it.
+        Failed or interrupted reservations still count. Keep the local server running while a worker is active.</p>
     </section>
 """
         training_script = """
@@ -407,6 +408,24 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     try {
       const response = await fetch("/api/status", {cache: "no-store"});
       const data = await response.json();
+      const used = Math.max(0, Number(data.attempts_used) || 0);
+      const remaining = Math.max(0, Number(data.remaining) || 0);
+      const usedBounded = Math.min(15, used);
+      document.getElementById("shared-attempts-used").textContent = used;
+      document.getElementById("attempts-remaining").textContent = remaining;
+      document.getElementById("shared-budget-bar").setAttribute("aria-valuenow", usedBounded);
+      document.getElementById("shared-budget-fill").style.width = (usedBounded / 15 * 100) + "%";
+      document.getElementById("shared-budget-label").textContent = used + " of 15 used";
+      document.getElementById("shared-budget-remaining").textContent = remaining + " remain";
+      const phaseLimits = {search: 11, probe: 2, audit: 1, final: 1};
+      for (const [phase, limit] of Object.entries(phaseLimits)) {
+        const count = Math.max(0, Number((data.phase_counts || {})[phase]) || 0);
+        const bounded = Math.min(count, limit);
+        document.getElementById("phase-track-" + phase).setAttribute("aria-valuenow", bounded);
+        document.getElementById("phase-fill-" + phase).style.width = (bounded / limit * 100) + "%";
+        document.getElementById("phase-count-" + phase).textContent = bounded;
+        document.getElementById("phase-remaining-" + phase).textContent = Math.max(0, limit - count);
+      }
       manual.disabled = !data.manual_enabled || polling;
       full.disabled = !data.full_enabled || polling;
       if (data.operation && data.operation.state === "running") {
@@ -420,11 +439,12 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
           (data.remaining === 0 ? "The shared attempt budget is exhausted." :
           "Budget: " + data.attempts_used + "/15 used, " + data.remaining + " remaining."));
       }
-      if (polling) window.setTimeout(refresh, 1800);
+      window.setTimeout(refresh, polling ? 1600 : 5000);
     } catch (error) {
       manual.disabled = true;
       full.disabled = true;
       state.textContent = "Cannot read local training status. Refresh the page and check the server.";
+      window.setTimeout(refresh, 5000);
     }
   }
   async function start(url, payload, message) {
@@ -475,9 +495,9 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     else:
         hidden_test = "Hidden-test metrics: unavailable (official test data and result not supplied)"
     notice_text = (
-        "Training controls require explicit host authorization; status, Search evidence, and "
-        "saved artifacts remain visible here. Organizer data equivalence and submission "
-        "compatibility must be verified separately."
+        "Choose a training action when you are ready. Every fit is recorded in the shared "
+        "attempt ledger. Organizer data equivalence and submission compatibility must be "
+        "verified separately."
         if training_controls else
         "Read-only report: this page does not train or reserve attempts. Organizer dataset "
         "equivalence and submission compatibility must be verified separately."
@@ -657,7 +677,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
 <body>
   <main class="shell">
     <header class="masthead"><div class="brand"><span class="brand-mark" aria-hidden="true">A/15</span>
-      <span>Autonomis</span></div><div class="mast-meta">Experiment control room · read-only</div></header>
+      <span>Autonomis</span></div><div class="mast-meta">Local experiment control room</div></header>
     <section class="hero" aria-labelledby="page-title">
       <div><span class="eyebrow">Budget-constrained churn research</span>
         <h1 id="page-title">Make every experiment count.</h1>
@@ -674,10 +694,10 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     </section>
     <section class="metrics" aria-label="Campaign status">
       <article class="metric-card"><span class="metric-label">Shared attempts used</span>
-        <strong class="metric-value">{used} <span>/ 15</span></strong>
+        <strong class="metric-value"><span id="shared-attempts-used">{used}</span> <span>/ 15</span></strong>
         <span class="metric-hint">Across campaigns · failed and interrupted reservations count.</span></article>
       <article class="metric-card"><span class="metric-label">Attempts remaining</span>
-        <strong class="metric-value">{remaining}</strong><span class="metric-hint">Hard limit across all phases.</span></article>
+        <strong id="attempts-remaining" class="metric-value">{remaining}</strong><span class="metric-hint">Hard limit across all phases.</span></article>
       <article class="metric-card"><span class="metric-label">Best Search ROC-AUC</span>
         <strong class="metric-value">{best_text}</strong><span class="metric-hint">Search validation only · not hidden-test performance.</span></article>
       <article class="metric-card"><span class="metric-label">Audit status</span>

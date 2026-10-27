@@ -25,18 +25,18 @@ def _open_ledger(config):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Budgeted churn tooling; training disabled by default")
+    parser = argparse.ArgumentParser(description="Budgeted churn tooling with explicit training actions")
     parser.add_argument("--config", default="configs/campaign.yaml")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("profile", "prepare", "preflight", "status", "plan", "report"):
         commands.add_parser(name)
-    website = commands.add_parser("serve", help="Serve the read-only campaign demo on localhost")
+    website = commands.add_parser("serve", help="Serve the local campaign demo")
     website.add_argument("--host", default="127.0.0.1")
     website.add_argument("--port", default=8502, type=int)
     reconcile = commands.add_parser("reconcile", help="Mark a verified stopped worker interrupted")
     reconcile.add_argument("--confirm-no-active-worker", action="store_true",
                            help="Required operator confirmation before changing ledger state")
-    training = commands.add_parser("train", help="Requires explicit host authorization and --execute")
+    training = commands.add_parser("train", help="Run the campaign; requires --execute")
     training.add_argument("--execute", action="store_true")
     prediction = commands.add_parser("predict", help="Load a trusted bundle; never fit")
     prediction.add_argument("--artifact", required=True)
@@ -47,7 +47,7 @@ def main(argv=None):
         config = load_config(args.config)
         if args.command == "train":
             if not args.execute:
-                raise TrainingDisabled("Training requires --execute and a configured training host")
+                raise TrainingDisabled("Training requires --execute and enable_training: true")
             config.permit.check()
             value = run_campaign(config)
         elif args.command == "profile":

@@ -1,4 +1,3 @@
-import socket
 import sys
 from types import SimpleNamespace
 
@@ -87,7 +86,7 @@ def test_gpu_preflight_rejects_insufficient_free_vram(monkeypatch):
 
 def test_fake_worker_result_is_durable_and_duplicate_does_not_execute_again(tmp_path):
     ledger = ledger_at(tmp_path)
-    kwargs = dict(output_dir=tmp_path, permit=TrainingPermit(True, socket.gethostname()),
+    kwargs = dict(output_dir=tmp_path, permit=TrainingPermit(True),
                   worker=fixed_worker, timeout_seconds=30)
     first = run_attempt(ledger, Recipe("lr"), "search", "part", {}, **kwargs)
     assert first["status"] == "succeeded" and first["result"]["value"] == 1
@@ -97,7 +96,7 @@ def test_fake_worker_result_is_durable_and_duplicate_does_not_execute_again(tmp_
 
 def test_worker_failure_and_timeout_never_refund_tokens(tmp_path):
     ledger = ledger_at(tmp_path)
-    kwargs = dict(output_dir=tmp_path, permit=TrainingPermit(True, socket.gethostname()))
+    kwargs = dict(output_dir=tmp_path, permit=TrainingPermit(True))
     failed = run_attempt(ledger, Recipe("lr"), "search", "part", {},
                          worker=failing_worker, timeout_seconds=30, **kwargs)
     assert failed["status"] == "failed" and "deliberate" in failed["error"]

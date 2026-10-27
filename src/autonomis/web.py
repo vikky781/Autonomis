@@ -1,4 +1,4 @@
-"""Loopback HTTP server for the read-only campaign report."""
+"""Loopback HTTP server for the campaign dashboard and explicit run controls."""
 
 import ipaddress
 import json
@@ -63,6 +63,7 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
         return {"enabled": enabled, "manual_enabled": manual_enabled,
                 "full_enabled": full_enabled, "reason": reason,
                 "attempts_used": ledger.used, "remaining": ledger.remaining,
+                "phase_counts": ledger.phase_counts(),
                 "operation": current}
 
     def start_operation(action, family=None):
@@ -70,7 +71,7 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
             if operation["state"] == "running":
                 raise ValueError("A training action is already running")
             operation.update(id=secrets.token_hex(8), state="running",
-                             message="Starting authorized training action…")
+                             message="Starting requested training action…")
             operation_id = operation["id"]
 
         def run():
@@ -185,7 +186,7 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
             print(f"{self.address_string()} - {format_string % args}")
 
     server = ThreadingHTTPServer((host, port), ReportHandler)
-    print(f"Autonomis read-only demo: http://{host}:{server.server_port}")
+    print(f"Autonomis local campaign demo: http://{host}:{server.server_port}")
     print("Refresh the page to read the latest saved campaign evidence. Press Ctrl+C to stop.")
     try:
         server.serve_forever()

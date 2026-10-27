@@ -1,4 +1,3 @@
-import socket
 from dataclasses import replace
 
 import numpy as np
@@ -45,7 +44,8 @@ def inline_fixture_attempt(ledger, recipe, phase, membership_hash, job, **kwargs
 
 
 def test_disabled_campaign_does_not_create_output_or_consume_budget(tmp_path):
-    config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "denied")
+    config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "denied",
+                     permit=TrainingPermit())
     with pytest.raises(TrainingDisabled):
         campaign.run_campaign(config)
     assert not config.output_dir.exists()
@@ -53,7 +53,7 @@ def test_disabled_campaign_does_not_create_output_or_consume_budget(tmp_path):
 
 def test_gpu_campaign_rejects_small_reference_before_reservation(tmp_path):
     config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "gpu", backend="gpu",
-                     permit=TrainingPermit(True, socket.gethostname()))
+                     permit=TrainingPermit(True))
     with pytest.raises(ValueError, match="50,000"):
         campaign.run_campaign(config, kind="simulation")
     _, _, ledger = campaign.prepare_campaign(config, kind="simulation")
@@ -62,7 +62,7 @@ def test_gpu_campaign_rejects_small_reference_before_reservation(tmp_path):
 
 def test_complete_simulated_campaign_locks_distinct_proxy_and_final_roles(tmp_path, monkeypatch):
     config = replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "simulation",
-                     permit=TrainingPermit(True, socket.gethostname()))
+                     permit=TrainingPermit(True))
     monkeypatch.setattr(campaign, "run_attempt", inline_fixture_attempt)
     final = campaign.run_campaign(config, kind="simulation", families=("lr", "catboost", "lightgbm"))
     assert final["kind"] == "simulation" and final["official_submission"] is False

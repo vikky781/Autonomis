@@ -1,6 +1,5 @@
 import hashlib
 import json
-import socket
 from dataclasses import replace
 
 import numpy as np
@@ -24,7 +23,7 @@ class SparseResponse:
 
 def config_at(tmp_path):
     return replace(load_config("configs/campaign.yaml"), output_dir=tmp_path / "campaign",
-                   permit=TrainingPermit(True, socket.gethostname()))
+                   permit=TrainingPermit(True))
 
 
 def test_sparse_scoring_uses_row_count_not_ambiguous_sparse_length():
@@ -34,7 +33,7 @@ def test_sparse_scoring_uses_row_count_not_ambiguous_sparse_length():
 @pytest.mark.parametrize("enabled", ["false", 1])
 def test_truthy_nonboolean_cannot_authorize_training(enabled):
     with pytest.raises(TrainingDisabled):
-        TrainingPermit(enabled, socket.gethostname()).check()
+        TrainingPermit(enabled).check()
 
 
 def test_prepare_cannot_recreate_a_lost_ledger(tmp_path):
