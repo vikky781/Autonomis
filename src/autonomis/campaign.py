@@ -67,6 +67,74 @@ def observations(ledger, phase="search"):
     return result
 
 
+def run_single_search_attempt(config, family):
+    """Run exactly one authorized Search attempt for a chosen model family."""
+    config.permit.check()
+    if family not in {"lr", "catboost", "lightgbm"}:
+        raise ValueError("Choose Logistic Regression, CatBoost, or LightGBM")
+    data, splits, ledger = prepare_campaign(config)
+    if ledger.identity["kind"] != "real":
+        raise ValueError("Manual training is disabled for simulation campaigns")
+    if ledger.audit_lock is not None:
+        raise ValueError("Audit is locked; this campaign cannot train again")
+    if (config.output_dir / "selection.json").exists() or (config.output_dir / "frozen-recipe.json").exists():
+        raise ValueError("Search is closed because terminal selection has started")
+    if config.backend == "gpu":
+        gpu_preflight(len(data.ids))
+
+    counts = ledger.phase_counts()
+    if ledger.remaining <= 2:
+        raise ValueError("The two terminal attempts are reserved for Audit and final fitting")
+    if counts.get("search", 0) >= 11:
+        raise ValueError("The shared Search phase limit of 11 attempts is exhausted")
+
+    available = tuple(family_name for family_name in ("lr", "catboost", "lightgbm")
+                      if family_name == "lr" or importlib.util.find_spec(family_name) is not None)
+    runtime_path = config.output_dir / "runtime.json"
+    if runtime_path.exists():
+        runtime = read_json(runtime_path)
+        if (runtime["host"] != socket.gethostname() or runtime["backend"] != config.backend
+                or runtime["families"] != list(available)):
+            raise ValueError("Training host, backend, or supported families changed on resume")
+    else:
+        if ledger.used:
+            raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
+        runtime = {"host": socket.gethostname(), "families": list(available),
+                   "backend": config.backend, "started_at": time.time()}
+        write_json(runtime_path, runtime)
+    if family not in runtime["families"]:
+        raise ValueError(f"{family} is unavailable in this environment")
+    planner = Planner(families=(family,), feature_ablation=config.feature_ablation,
+                      seed=config.seed, threads=config.threads, backend=config.backend)
+    family_history = [row for row in observations(ledger) if row.recipe.family == family]
+    family_attempts = [Recipe(**row["details"]["recipe"]) for row in ledger.attempts()
+                       if row["phase"] == "search"
+                       and row["details"]["recipe"]["family"] == family]
+    proposal = planner.propose(family_history, family_attempts)
+    if proposal is None:
+        raise ValueError(f"No new Search recipe is available for {family}")
+
+    deadline = runtime["started_at"] + config.exploration_seconds
+    durations = [row["result"].get("wall_seconds", row["result"].get("fit_seconds", 0))
+                 for row in ledger.attempts() if row["status"] == "succeeded"
+                 and row["phase"] == "search"
+                 and row["details"]["recipe"]["family"] == family]
+    estimate = min(config.timeout_seconds, 1.5 * max(durations, default=config.timeout_seconds))
+    remaining_time = deadline - time.time()
+    if remaining_time < estimate + 120:
+        raise ValueError("Not enough Search time remains for a safe attempt")
+    timeout = min(config.timeout_seconds, remaining_time - 120)
+    job = {"dataset_path": str(config.dataset), "dataset_hash": data.sha256,
+           "train_ids": splits["train"], "valid_ids": splits["search"],
+           "fixed_tree_count": None}
+    membership = fingerprint({"train": splits["train"], "valid": splits["search"],
+                              "trees": None})
+    return run_attempt(ledger, proposal.recipe, "search", membership, job,
+                       output_dir=config.output_dir, permit=config.permit,
+                       timeout_seconds=timeout,
+                       details=proposal.to_dict())
+
+
 def _verify(directory, data, splits, *, proxy=False):
     bundle = load_bundle(directory)
     if bundle.manifest["provenance"]["dataset_hash"] != data.sha256:

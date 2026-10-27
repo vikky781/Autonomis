@@ -44,7 +44,7 @@ python -m autonomis reconcile --confirm-no-active-worker
 - `status` reads the consumed/remaining budget and audit-lock state.
 - `plan` prints the next proposed recipe and rationale without reserving or running it.
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
-- `serve` hosts the judge-facing report on `http://127.0.0.1:8502`. It refreshes its view from saved evidence on each page load and never trains or reserves attempts. Run `prepare` once first to create the empty campaign ledger.
+- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It refreshes from saved evidence and shows two explicit controls: one manually selected Search fit, or the sequential campaign runner (up to 15 shared attempts). Both controls remain disabled unless `enable_training: true` and `training_host` exactly matches the current machine; the sequential runner may stop early when phase gates or runtime deadlines require it. Run `prepare` once first to create the empty campaign ledger.
 - `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
 The browser demo is generated from the campaign ledger and uses Python's standard-library HTTP server. It needs no GPU, JavaScript build, or extra web package. The dashboard shows the current phase and why the next step follows, while retaining detailed run cards and a clear separation between Search, Audit-proxy, final-fit, and hidden-test evidence.

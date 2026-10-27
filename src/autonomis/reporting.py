@@ -260,7 +260,8 @@ def _artifact_panel(summary, audit_lock):
     """
 
 
-def render_report(ledger, destination, *, summary=None, dataset_role=None):
+def render_report(ledger, destination, *, summary=None, dataset_role=None,
+                  training_controls=False, csrf_token=None):
     """Render campaign evidence as a standalone page without mutating the ledger."""
     rows = ledger.attempts()
     used = ledger.used
@@ -360,6 +361,102 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
     )
     artifacts = _artifact_panel(summary, audit_lock)
     timeline_html = "".join(timeline)
+    training_panel = ""
+    training_script = ""
+    if training_controls:
+        token = html.escape(str(csrf_token or ""), quote=True)
+        training_panel = """
+    <section class="section training-panel" aria-labelledby="training-title">
+      <div class="section-head"><div><span class="eyebrow">Experiment controls</span>
+        <h2 id="training-title">Choose how to run training</h2></div>
+        <p>Every fit uses the same shared, hard 15-attempt ledger.</p></div>
+      <div class="training-grid">
+        <article class="training-card">
+          <span class="eyebrow">Manual mode</span><h3>Train one model at a time</h3>
+          <p>Choose one family for a single Search attempt. Review its result before deciding what to run next.</p>
+          <label for="model-family">Model family</label>
+          <select id="model-family">
+            <option value="lr">Logistic Regression</option>
+            <option value="catboost">CatBoost</option>
+            <option value="lightgbm">LightGBM</option>
+          </select>
+          <button id="manual-button" type="button" disabled>Train one Search attempt</button>
+        </article>
+        <article class="training-card training-card-primary">
+          <span class="eyebrow">Sequential campaign</span><h3>Run the campaign automatically</h3>
+          <p>Run adaptive Search, eligible finalist checks, Audit, and final fit in order. It uses up to the remaining budget; phase gates and deadlines may leave attempts unused.</p>
+          <button id="full-button" type="button" disabled>Run full campaign</button>
+        </article>
+      </div>
+      <p id="training-state" class="training-state" role="status" aria-live="polite">
+        Checking training authorization…</p>
+      <p class="training-caution">Training is available only when this machine matches the explicitly configured training host.
+        Failed or interrupted reservations still count. Do not close the server while a worker is active.</p>
+    </section>
+"""
+        training_script = """
+<script>
+(() => {
+  const token = "__AUTONOMIS_TOKEN__";
+  const manual = document.getElementById("manual-button");
+  const full = document.getElementById("full-button");
+  const state = document.getElementById("training-state");
+  const family = document.getElementById("model-family");
+  let polling = false;
+  async function refresh() {
+    try {
+      const response = await fetch("/api/status", {cache: "no-store"});
+      const data = await response.json();
+      manual.disabled = !data.manual_enabled || polling;
+      full.disabled = !data.full_enabled || polling;
+      if (data.operation && data.operation.state === "running") {
+        state.textContent = data.operation.message + " Budget: " + data.attempts_used +
+          "/15 used, " + data.remaining + " remaining.";
+        polling = true;
+      } else {
+        polling = false;
+        state.textContent = (data.operation && ["finished", "failed"].includes(data.operation.state)
+          ? data.operation.message + " " : "") + (data.reason ||
+          (data.remaining === 0 ? "The shared attempt budget is exhausted." :
+          "Budget: " + data.attempts_used + "/15 used, " + data.remaining + " remaining."));
+      }
+      if (polling) window.setTimeout(refresh, 1800);
+    } catch (error) {
+      manual.disabled = true;
+      full.disabled = true;
+      state.textContent = "Cannot read local training status. Refresh the page and check the server.";
+    }
+  }
+  async function start(url, payload, message) {
+    if (!window.confirm(message)) return;
+    manual.disabled = true;
+    full.disabled = true;
+    state.textContent = "Submitting action to the local campaign controller…";
+    try {
+      const response = await fetch(url, {method: "POST", cache: "no-store",
+        headers: {"Content-Type": "application/json", "X-Autonomis-Token": token},
+        body: JSON.stringify(payload)});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "The training action was rejected.");
+      polling = true;
+      state.textContent = "Training has started. The attempt ledger is updated as work proceeds.";
+      refresh();
+    } catch (error) {
+      polling = false;
+      state.textContent = error.message;
+      refresh();
+    }
+  }
+  manual.addEventListener("click", () => start("/api/train/manual",
+    {family: family.value}, "Start one " + family.options[family.selectedIndex].text +
+    " Search fit? This reserves one attempt from the shared budget."));
+  full.addEventListener("click", () => start("/api/train/full", {},
+    "Run the sequential campaign now? It may use up to all remaining shared attempts. " +
+    "Every failed or interrupted reservation counts."));
+  refresh();
+})();
+</script>
+""".replace("__AUTONOMIS_TOKEN__", token)
     if not timeline_html:
         if used == 0:
             empty_timeline = (
@@ -377,6 +474,14 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
         hidden_test = f"Reported hidden-test score: {_metric(summary['hidden_test_score'])}"
     else:
         hidden_test = "Hidden-test metrics: unavailable (official test data and result not supplied)"
+    notice_text = (
+        "Training controls require explicit host authorization; status, Search evidence, and "
+        "saved artifacts remain visible here. Organizer data equivalence and submission "
+        "compatibility must be verified separately."
+        if training_controls else
+        "Read-only report: this page does not train or reserve attempts. Organizer dataset "
+        "equivalence and submission compatibility must be verified separately."
+    )
 
     content = f"""<!doctype html>
 <html lang="en">
@@ -514,6 +619,21 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
       background: #f7faf8; border-radius: 8px; }}
     .artifact-empty p {{ margin: 4px 0 0; color: var(--muted); font-size: 12px; }}
     .status-mark {{ color: var(--signal); font: 20px var(--mono); }}
+    .training-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }}
+    .training-card {{ display: flex; flex-direction: column; align-items: start; gap: 10px;
+      padding: 21px; background: var(--surface); border: 1px solid var(--line);
+      border-radius: 4px 16px 16px 16px; }}
+    .training-card-primary {{ border-color: #83b9a9; box-shadow: inset 0 3px 0 var(--signal); }}
+    .training-card h3 {{ margin: 0; font-size: 18px; }}
+    .training-card p {{ flex: 1; margin: 0; color: var(--muted); font-size: 12px; }}
+    .training-card label {{ color: var(--muted); font-size: 11px; font-weight: 700; }}
+    .training-card select {{ width: 100%; padding: 11px 12px; color: var(--ink); background: #fff;
+      border: 1px solid var(--line); border-radius: 8px; font: inherit; }}
+    .training-card button {{ min-height: 42px; padding: 10px 15px; color: white; background: var(--signal);
+      border: 0; border-radius: 8px; font: 700 12px var(--sans); cursor: pointer; }}
+    .training-card button:disabled {{ color: #687975; background: #dfe7e3; cursor: not-allowed; }}
+    .training-state {{ min-height: 22px; margin: 12px 0 5px; color: var(--ink); font: 12px var(--mono); }}
+    .training-caution {{ margin: 0; color: var(--muted); font-size: 11px; }}
     footer {{ margin-top: 31px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--muted);
       font-size: 11px; display: flex; justify-content: space-between; gap: 18px; }}
     @media (max-width: 1050px) {{ .metrics {{ grid-template-columns: repeat(3, 1fr); }} }}
@@ -522,6 +642,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
       .hero {{ grid-template-columns: 1fr; padding-top: 25px; }} .mode-pill {{ justify-self: start; }}
       .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .charts,.artifact-grid,.metric-notes,.phase-grid {{ grid-template-columns: 1fr; }}
+      .training-grid {{ grid-template-columns: 1fr; }}
       .now-panel {{ grid-template-columns: 1fr; gap: 8px; }}
       .attempt {{ grid-template-columns: 34px minmax(0, 1fr); gap: 8px; }}
       .attempt-marker span {{ width: 29px; height: 29px; }} .attempt-marker::after {{ top: 32px; }}
@@ -543,8 +664,8 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
         <p>One auditable view of the runs, evidence, and artifacts behind the churn prediction campaign.</p></div>
       {mode}
     </section>
-    <p class="notice">Read-only demo: this page explains saved campaign evidence. It does not train or reserve attempts.
-      Organizer dataset equivalence and submission compatibility must be verified separately.</p>
+    <p class="notice">{_text(notice_text)}</p>
+    {training_panel}
     <p class="data-scope">{_text(data_label)}</p>
     <section class="section now-panel" aria-labelledby="now-title">
       <div><span class="now-label">What is happening now</span></div>
@@ -610,6 +731,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None):
     <footer><span>Autonomis · derived from local campaign records</span>
       <span>Organizer equivalence and output-schema compatibility are not inferred from this report.</span></footer>
   </main>
+  {training_script}
 </body>
 </html>"""
     destination = Path(destination)

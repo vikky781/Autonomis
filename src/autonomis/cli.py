@@ -80,7 +80,7 @@ def main(argv=None):
                      "remaining": ledger.remaining}
         elif args.command == "serve":
             ledger = _open_ledger(config)
-            serve_report(ledger, config.output_dir, dataset_role=config.dataset_role,
+            serve_report(ledger, config.output_dir, dataset_role=config.dataset_role, config=config,
                          host=args.host, port=args.port)
             return 0
         else:

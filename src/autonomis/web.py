@@ -1,27 +1,127 @@
 """Loopback HTTP server for the read-only campaign report."""
 
+import ipaddress
+import json
+import secrets
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from autonomis.campaign import run_campaign, run_single_search_attempt
 from autonomis.reporting import render_report
 from autonomis.storage import read_json
 
 
-def serve_report(ledger, output_dir, *, dataset_role, host="127.0.0.1", port=8502):
-    """Serve a freshly rendered report; requests never train or reserve attempts."""
+def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0.1", port=8502):
+    """Serve the campaign demo and explicitly requested training actions on loopback."""
     output_dir = Path(output_dir)
     report_path = output_dir / "report.html"
     summary_path = output_dir / "summary.json"
+    csrf_token = secrets.token_urlsafe(32)
+    try:
+        is_loopback = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        is_loopback = host.lower() == "localhost"
+    operation_lock = threading.Lock()
+    operation = {"id": None, "state": "idle", "message": "No training action started."}
+
+    def control_status():
+        reason = ""
+        enabled = config is not None
+        if config is None:
+            reason = "Training actions are not configured for this server."
+        else:
+            try:
+                config.permit.check()
+            except Exception as error:
+                enabled = False
+                reason = str(error)
+            if ledger.identity.get("kind") != "real":
+                enabled = False
+                reason = "Training controls are unavailable for simulation ledgers."
+            elif ledger.audit_lock is not None:
+                enabled = False
+                reason = "Audit is locked; this campaign cannot train again."
+            if not is_loopback:
+                enabled = False
+                reason = "Training controls are disabled unless the server binds to a loopback address."
+        with operation_lock:
+            current = dict(operation)
+        busy = current["state"] == "running"
+        manual_enabled = enabled and not busy and ledger.remaining > 2
+        if manual_enabled and ledger.phase_counts().get("search", 0) >= 11:
+            manual_enabled = False
+        if manual_enabled and ((output_dir / "selection.json").exists()
+                               or (output_dir / "frozen-recipe.json").exists()):
+            manual_enabled = False
+        full_enabled = enabled and not busy and ledger.remaining > 0
+        if full_enabled and (output_dir / "selection.json").exists():
+            full_enabled = False
+        if busy and not reason:
+            reason = "A training action is already running."
+        return {"enabled": enabled, "manual_enabled": manual_enabled,
+                "full_enabled": full_enabled, "reason": reason,
+                "attempts_used": ledger.used, "remaining": ledger.remaining,
+                "operation": current}
+
+    def start_operation(action, family=None):
+        with operation_lock:
+            if operation["state"] == "running":
+                raise ValueError("A training action is already running")
+            operation.update(id=secrets.token_hex(8), state="running",
+                             message="Starting authorized training action…")
+            operation_id = operation["id"]
+
+        def run():
+            try:
+                if config is None:
+                    raise ValueError("Training actions are not configured for this server")
+                config.permit.check()
+                if action == "manual":
+                    result = run_single_search_attempt(config, family)
+                    summary = (f"Search attempt {result['id']} {result['status']} "
+                               f"for {family}.")
+                else:
+                    result = run_campaign(config)
+                    summary = (f"Full campaign finished with {result.get('attempts_used', ledger.used)} "
+                               "attempt(s) recorded.")
+                with operation_lock:
+                    operation.update(state="finished", message=summary)
+            except Exception as error:
+                with operation_lock:
+                    operation.update(state="failed", message=str(error),
+                                     error_type=type(error).__name__)
+
+        threading.Thread(target=run, name=f"autonomis-{action}-{operation_id}",
+                         daemon=True).start()
+        return operation_id
 
     class ReportHandler(BaseHTTPRequestHandler):
+        def _json(self, status, value):
+            content = json.dumps(value, allow_nan=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(content)
+
         def do_GET(self):
-            if urlsplit(self.path).path not in {"/", "/index.html"}:
+            path = urlsplit(self.path).path
+            if path == "/api/status":
+                try:
+                    self._json(200, control_status())
+                except Exception as error:
+                    self._json(503, {"enabled": False, "reason": str(error)})
+                return
+            if path not in {"/", "/index.html"}:
                 self.send_error(404, "Only the campaign report is available")
                 return
             try:
                 summary = read_json(summary_path) if summary_path.is_file() else None
-                render_report(ledger, report_path, summary=summary, dataset_role=dataset_role)
+                render_report(ledger, report_path, summary=summary, dataset_role=dataset_role,
+                              training_controls=True, csrf_token=csrf_token)
                 content = report_path.read_bytes()
             except (OSError, ValueError, RuntimeError) as error:
                 content = f"Report unavailable: {error}".encode("utf-8")
@@ -38,6 +138,48 @@ def serve_report(ledger, output_dir, *, dataset_role, host="127.0.0.1", port=850
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(content)
+
+        def do_POST(self):
+            path = urlsplit(self.path).path
+            if path not in {"/api/train/manual", "/api/train/full"}:
+                self._json(404, {"error": "Unknown training action"})
+                return
+            origin = self.headers.get("Origin", "")
+            expected_origin = f"http://{self.headers.get('Host', '')}"
+            if origin != expected_origin or self.headers.get("X-Autonomis-Token") != csrf_token:
+                self._json(403, {"error": "Request origin or page token is invalid"})
+                return
+            if config is None:
+                self._json(403, {"error": "Training actions are not configured"})
+                return
+            try:
+                if not is_loopback:
+                    raise ValueError("Training controls require a loopback-bound server")
+                config.permit.check()
+                if ledger.identity.get("kind") != "real":
+                    raise ValueError("Training controls are disabled for simulation ledgers")
+                if ledger.audit_lock is not None:
+                    raise ValueError("Audit is locked; no further training is allowed")
+                length = int(self.headers.get("Content-Length", "0"))
+                if length < 0 or length > 4096:
+                    raise ValueError("Invalid request size")
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(payload, dict):
+                    raise ValueError("Invalid training request")
+                if path.endswith("/manual"):
+                    family = payload.get("family")
+                    if family not in {"lr", "catboost", "lightgbm"}:
+                        raise ValueError("Choose a supported model family")
+                    action = "manual"
+                else:
+                    action, family = "full", None
+                operation_id = start_operation(action, family)
+                self._json(202, {"operation_id": operation_id,
+                                 "message": "Training action accepted"})
+            except (ValueError, RuntimeError) as error:
+                self._json(409, {"error": str(error)})
+            except Exception as error:
+                self._json(403, {"error": str(error)})
 
         def log_message(self, format_string, *args):
             print(f"{self.address_string()} - {format_string % args}")
