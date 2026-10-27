@@ -74,6 +74,8 @@ class Ledger:
                 created TEXT NOT NULL)""")
             db.execute("""CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS audit_locks (
+                campaign_path TEXT PRIMARY KEY, value TEXT NOT NULL)""")
             self._sync_budget(db)
 
     def _sync_budget(self, budget):
@@ -98,11 +100,12 @@ class Ledger:
                         "SELECT value FROM metadata WHERE key='audit_lock'").fetchone()
                     if lock:
                         current = budget.execute(
-                            "SELECT value FROM metadata WHERE key='audit_lock'").fetchone()
+                            "SELECT value FROM audit_locks WHERE campaign_path=?", (str(path),)
+                        ).fetchone()
                         if current and json.loads(current[0]) != json.loads(lock[0]):
-                            raise ValueError("Conflicting Audit locks across campaign ledgers")
-                        budget.execute("INSERT OR IGNORE INTO metadata VALUES ('audit_lock', ?)",
-                                       (lock[0],))
+                            raise ValueError(f"Conflicting Audit locks in campaign ledger {path}")
+                        budget.execute("INSERT OR IGNORE INTO audit_locks VALUES (?, ?)",
+                                       (str(path), lock[0]))
             except sqlite3.Error as error:
                 raise ValueError(f"Cannot reconcile campaign ledger {path}") from error
 
@@ -190,18 +193,26 @@ class Ledger:
         return max(0, 15 - self.used)
 
     def phase_counts(self):
-        """Return attempt counts by phase across the shared real-campaign budget."""
-        if self.identity["kind"] != "real":
-            counts = {}
-            for row in self.attempts():
-                counts[row["phase"]] = counts.get(row["phase"], 0) + 1
-            return counts
-        with self._budget_db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            self._sync_budget(db)
-            return {row["phase"]: row["count"] for row in db.execute(
-                "SELECT phase, COUNT(*) AS count FROM attempts GROUP BY phase"
-            )}
+        """Return phase counts for this campaign; total budget is shared globally."""
+        counts = {}
+        for row in self.attempts():
+            counts[row["phase"]] = counts.get(row["phase"], 0) + 1
+        return counts
+
+    @property
+    def has_active_attempt(self):
+        """Whether any real campaign has a reserved or running worker."""
+        if self.identity["kind"] == "real":
+            with self._budget_db() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self._sync_budget(db)
+                return bool(db.execute(
+                    "SELECT 1 FROM attempts WHERE status IN ('reserved','running') LIMIT 1"
+                ).fetchone())
+        with self._db() as db:
+            return bool(db.execute(
+                "SELECT 1 FROM attempts WHERE status IN ('reserved','running') LIMIT 1"
+            ).fetchone())
 
     @property
     def audit_lock(self):
@@ -209,7 +220,8 @@ class Ledger:
             with self._budget_db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 self._sync_budget(db)
-                row = db.execute("SELECT value FROM metadata WHERE key='audit_lock'").fetchone()
+                row = db.execute("SELECT value FROM audit_locks WHERE campaign_path=?",
+                                 (str(self.path),)).fetchone()
                 return json.loads(row[0]) if row else None
         with self._db() as db:
             row = db.execute("SELECT value FROM metadata WHERE key='audit_lock'").fetchone()
@@ -224,22 +236,27 @@ class Ledger:
             if budget is not None:
                 budget.execute("BEGIN IMMEDIATE")
                 self._sync_budget(budget)
-                if budget.execute("SELECT 1 FROM metadata WHERE key='audit_lock'").fetchone():
-                    raise BudgetError("Training prohibited after audit lock")
+                if budget.execute("SELECT 1 FROM audit_locks WHERE campaign_path=?",
+                                  (str(self.path),)).fetchone():
+                    raise BudgetError("Training prohibited after this campaign's Audit lock")
                 if budget.execute("SELECT 1 FROM attempts WHERE status IN ('reserved','running')").fetchone():
                     raise BudgetError("An active worker/reservation exists in another campaign")
                 global_used = budget.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
-                global_phase_count = budget.execute(
-                    "SELECT COUNT(*) FROM attempts WHERE phase=?", (phase,)).fetchone()[0]
-                if global_used >= 15 or global_phase_count >= LIMITS[phase]:
-                    raise BudgetError("Global attempt or phase budget exhausted across campaigns")
+                campaign_phase_count = budget.execute(
+                    "SELECT COUNT(*) FROM attempts WHERE campaign_path=? AND phase=?",
+                    (str(self.path), phase)).fetchone()[0]
+                if global_used >= 15 or campaign_phase_count >= LIMITS[phase]:
+                    raise BudgetError("Shared attempt or campaign phase budget exhausted")
                 if phase in {"search", "probe"}:
-                    if global_used >= 13 or budget.execute(
-                            "SELECT 1 FROM attempts WHERE phase IN ('audit','final')").fetchone():
+                    has_terminal = budget.execute(
+                        "SELECT 1 FROM attempts WHERE campaign_path=? AND phase IN ('audit','final')",
+                        (str(self.path),)).fetchone()
+                    if global_used >= 13 or has_terminal:
                         raise BudgetError("Two terminal tokens are reserved; search is closed")
                 if phase == "final" and not budget.execute(
-                        "SELECT 1 FROM attempts WHERE phase='audit'").fetchone():
-                    raise BudgetError("The global audit-stage attempt must precede final fitting")
+                        "SELECT 1 FROM attempts WHERE campaign_path=? AND phase='audit'",
+                        (str(self.path),)).fetchone():
+                    raise BudgetError("The campaign Audit-stage attempt must precede final fitting")
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 if db.execute("SELECT 1 FROM metadata WHERE key='audit_lock'").fetchone():
@@ -317,13 +334,15 @@ class Ledger:
             if budget is not None:
                 budget.execute("BEGIN IMMEDIATE")
                 self._sync_budget(budget)
-                current = budget.execute("SELECT value FROM metadata WHERE key='audit_lock'").fetchone()
+                current = budget.execute("SELECT value FROM audit_locks WHERE campaign_path=?",
+                                         (str(self.path),)).fetchone()
                 if current and json.loads(current[0]) != identities:
-                    raise ValueError("Audit identities are already locked across campaigns")
+                    raise ValueError("Audit identities are already locked for this campaign")
                 if budget.execute(
                         "SELECT 1 FROM attempts WHERE status IN ('reserved','running')").fetchone():
                     raise BudgetError("Cannot lock audit while a worker is active in any campaign")
-                budget.execute("INSERT OR IGNORE INTO metadata VALUES ('audit_lock', ?)", (payload,))
+                budget.execute("INSERT OR IGNORE INTO audit_locks VALUES (?, ?)",
+                               (str(self.path), payload))
             with self._db() as db:
                 db.execute("BEGIN IMMEDIATE")
                 previous = db.execute("SELECT value FROM metadata WHERE key='audit_lock'").fetchone()

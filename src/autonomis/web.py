@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from autonomis.campaign import run_campaign, run_single_search_attempt
+from autonomis.campaign import run_campaign, run_single_search_attempt, start_new_round
 from autonomis.reporting import render_report
 from autonomis.storage import read_json
 
@@ -40,31 +40,49 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
             if ledger.identity.get("kind") != "real":
                 enabled = False
                 reason = "Training controls are unavailable for simulation ledgers."
-            elif ledger.audit_lock is not None:
-                enabled = False
-                reason = "Audit is locked; this campaign cannot train again."
             if not is_loopback:
                 enabled = False
                 reason = "Training controls are disabled unless the server binds to a loopback address."
+        audit_locked = ledger.audit_lock is not None
         with operation_lock:
             current = dict(operation)
         busy = current["state"] == "running"
-        manual_enabled = enabled and not busy and ledger.remaining > 2
+        training_enabled = enabled and not audit_locked
+        manual_enabled = training_enabled and not busy and ledger.remaining > 2
         if manual_enabled and ledger.phase_counts().get("search", 0) >= 11:
             manual_enabled = False
         if manual_enabled and ((output_dir / "selection.json").exists()
                                or (output_dir / "frozen-recipe.json").exists()):
             manual_enabled = False
-        full_enabled = enabled and not busy and ledger.remaining > 0
+        full_enabled = training_enabled and not busy and ledger.remaining > 0
         if full_enabled and (output_dir / "selection.json").exists():
             full_enabled = False
         if busy and not reason:
             reason = "A training action is already running."
+        if audit_locked and not reason:
+            reason = "This round's Audit is locked. Archive it to history and start a new round to use remaining attempts."
         return {"enabled": enabled, "manual_enabled": manual_enabled,
                 "full_enabled": full_enabled, "reason": reason,
+                "audit_locked": audit_locked,
+                "restart_enabled": enabled and audit_locked and not busy and ledger.remaining > 0,
                 "attempts_used": ledger.used, "remaining": ledger.remaining,
                 "phase_counts": ledger.phase_counts(),
                 "operation": current}
+
+    def restart_campaign():
+        nonlocal config, ledger, output_dir, report_path, summary_path
+        with operation_lock:
+            if operation["state"] == "running":
+                raise ValueError("Wait for the current training action to finish")
+            previous_path = output_dir
+            config, ledger = start_new_round(config, ledger)
+            output_dir = config.output_dir
+            report_path = output_dir / "report.html"
+            summary_path = output_dir / "summary.json"
+            operation.update(id=None, state="idle",
+                             message=f"Started a new round; previous campaign is saved at {previous_path}.")
+        return {"campaign_path": str(output_dir), "seed": config.seed,
+                "attempts_used": ledger.used, "remaining": ledger.remaining}
 
     def start_operation(action, family=None):
         with operation_lock:
@@ -142,7 +160,7 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
 
         def do_POST(self):
             path = urlsplit(self.path).path
-            if path not in {"/api/train/manual", "/api/train/full"}:
+            if path not in {"/api/train/manual", "/api/train/full", "/api/campaign/restart"}:
                 self._json(404, {"error": "Unknown training action"})
                 return
             origin = self.headers.get("Origin", "")
@@ -159,14 +177,21 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
                 config.permit.check()
                 if ledger.identity.get("kind") != "real":
                     raise ValueError("Training controls are disabled for simulation ledgers")
-                if ledger.audit_lock is not None:
-                    raise ValueError("Audit is locked; no further training is allowed")
                 length = int(self.headers.get("Content-Length", "0"))
                 if length < 0 or length > 4096:
                     raise ValueError("Invalid request size")
                 payload = json.loads(self.rfile.read(length) or b"{}")
                 if not isinstance(payload, dict):
                     raise ValueError("Invalid training request")
+                if path == "/api/campaign/restart":
+                    result = restart_campaign()
+                    self._json(200, {
+                        "message": "New round started; the previous round is preserved in history.",
+                        **result,
+                    })
+                    return
+                if ledger.audit_lock is not None:
+                    raise ValueError("This campaign's Audit is locked; start a new round to continue")
                 if path.endswith("/manual"):
                     family = payload.get("family")
                     if family not in {"lr", "catboost", "lightgbm"}:

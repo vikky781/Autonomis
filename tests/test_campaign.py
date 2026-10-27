@@ -1,7 +1,9 @@
 from dataclasses import replace
+from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 
 import autonomis.campaign as campaign
 from autonomis.artifacts import load_bundle, save_bundle
@@ -9,6 +11,7 @@ from autonomis.config import load_config
 from autonomis.contracts import TrainingDisabled, TrainingPermit
 from autonomis.data import load_table
 from autonomis.evaluation import score_predictions
+from autonomis.reporting import render_report
 
 
 class StoredResponse:
@@ -58,6 +61,39 @@ def test_gpu_campaign_rejects_small_reference_before_reservation(tmp_path):
         campaign.run_campaign(config, kind="simulation")
     _, _, ledger = campaign.prepare_campaign(config, kind="simulation")
     assert ledger.used == 0
+
+
+def test_start_new_round_preserves_history_and_shared_budget(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    raw = yaml.safe_load(Path("configs/campaign.yaml").read_text(encoding="utf-8"))
+    raw["dataset"] = str(Path(raw["dataset"]).resolve())
+    raw["output_dir"] = "campaigns/reference"
+    config_path = config_dir / "campaign.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    config = load_config(config_path)
+    _, _, ledger = campaign.prepare_campaign(config)
+    for index, phase in enumerate(["search"] * 5 + ["probe"] * 2 + ["audit", "final"]):
+        attempt = ledger.reserve(phase, f"recipe-{index}", f"membership-{index}")
+        ledger.finish(attempt, success=True, result={"synthetic": True})
+    ledger.lock_audit({"submission": "model-p", "proxy": "model-a",
+                       "audit_predictions": "predictions-a"})
+
+    next_config, next_ledger = campaign.start_new_round(config, ledger)
+
+    assert ledger.path.is_file()
+    assert next_config.output_dir != config.output_dir
+    assert next_config.seed == config.seed + 1
+    assert next_ledger.audit_lock is None
+    assert next_ledger.used == 9 and next_ledger.remaining == 6
+    assert next_ledger.phase_counts() == {}
+    resumed = load_config(config_path)
+    assert resumed.output_dir == next_config.output_dir
+    assert resumed.seed == next_config.seed
+    report = render_report(next_ledger, next_config.output_dir / "report.html",
+                           training_controls=True).read_text(encoding="utf-8")
+    assert "Earlier campaign history" in report
+    assert "reference" in report and "9 attempt(s) · Audit locked" in report
 
 
 def test_complete_simulated_campaign_locks_distinct_proxy_and_final_roles(tmp_path, monkeypatch):

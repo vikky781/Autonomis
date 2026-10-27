@@ -2,7 +2,7 @@
 
 Budget-constrained customer churn experimentation for Utkrishta 2026. The controller proposes experiments from prior development results, with a persistent maximum of 15 training attempts.
 
-**Current boundary:** CPU and CatBoost GPU execution paths are implemented. No predictive model has been trained in this workspace. The local dashboard and CLI allow an explicit training action on any machine where the project and its required packages are available. Native-model round-trips and GPU execution still need verification. Test fixtures do not represent measured model performance.
+**Current boundary:** CPU and CatBoost GPU execution paths are implemented. The current local ledger records nine real CPU fits; the Audit is locked for that round. The local dashboard and CLI allow explicit training actions on any machine where the project and required packages are available. Native-model round-trips and GPU execution still need verification. Test fixtures do not represent measured model performance.
 
 ## Safe local setup
 
@@ -44,14 +44,14 @@ python -m autonomis reconcile --confirm-no-active-worker
 - `status` reads the consumed/remaining budget and audit-lock state.
 - `plan` prints the next proposed recipe and rationale without reserving or running it.
 - `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
-- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It shows two explicit controls: one manually selected Search fit, or the sequential campaign runner (up to 15 shared attempts). Training is enabled in the checked-in campaign config and is not tied to a particular machine. The sequential runner may stop early when phase gates or runtime deadlines require it. Run `prepare` once first to create the empty campaign ledger.
+- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It shows a manually selected Search fit and a sequential campaign runner. After Audit locks, **Archive and start a new round** preserves the old ledger, creates a fresh split, and uses only the remaining shared attempts. Training is enabled in the checked-in config and is not tied to a particular machine. The sequential runner may stop early when phase gates or runtime deadlines require it.
 - `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
 
 The browser demo is generated from the campaign ledger and uses Python's standard-library HTTP server. It needs no GPU, JavaScript build, or extra web package. The dashboard shows the current phase and why the next step follows, while retaining detailed run cards and a clear separation between Search, Audit-proxy, final-fit, and hidden-test evidence.
 
-Generated state is under `campaigns/reference/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign ledgers, including archived campaign folders. Optional `history_ledgers` can import external historical runs; configured sources must remain available or ledger setup fails closed. Never delete or replace a ledger to obtain more fits.
+Generated state is under `campaigns/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign rounds, including archived ledgers. Audit locks and phase limits apply per round; the 15-attempt ceiling applies across the whole allocation. A new round does not clear prior attempt counts. Optional `history_ledgers` can import external historical runs; configured sources must remain available or ledger setup fails closed. Never delete or replace a ledger to obtain more fits.
 
-The local generated run records and model artifacts were cleared for a fresh workspace start. The local attempt counter now starts at zero and allows at most 15 newly recorded attempts. Clearing local files does not change any attempt allocation maintained by the organizer; confirm the applicable allowance before real training.
+An archived campaign remains visible in the dashboard history. The current round pointer is saved locally under `campaigns/current.json`, so CLI commands and the dashboard resume the latest round after restart.
 
 ## Starting training
 
@@ -80,7 +80,7 @@ Select `backend: gpu` before the campaign starts only when its data gate is met;
 
 ## Experiment protocol
 
-| Stage | Maximum counted attempts |
+| Stage | Per-round maximum attempts |
 |---|---:|
 | Initial LR / CatBoost / LightGBM anchors | 3 |
 | Adaptive search and one feature ablation | 8 |
@@ -89,7 +89,7 @@ Select `backend: gpu` before the campaign starts only when its data gate is met;
 | Submission candidate P trained on all labelled training rows | 1 |
 | **Total** | **15** |
 
-Reservations are consumed even when a worker fails, times out or crashes. One SQLite transaction protects capacity; only one reservation/worker may be active. Search/checks cannot consume the two reserved terminal tokens. A duplicate successful recipe/split returns its existing result; there is no automatic failed-fit retry. Native fitting runs in a supervised spawned worker with a configured timeout.
+Reservations are consumed even when a worker fails, times out or crashes. One SQLite transaction protects the shared allocation capacity; only one reservation/worker may be active. Search/checks cannot consume the two reserved terminal tokens within a round. A duplicate successful recipe/split returns its existing result; there is no automatic failed-fit retry. Native fitting runs in a supervised spawned worker with a configured timeout.
 
 Search uses Train 60% / Search 20%, with Audit 20% held out of search. Train-only learned preprocessing prevents leakage. The finite planner mutates one knob at a time, prioritizes capacity/regularization from feedback, switches families on stagnation, and records every actual decision. The fixed V1 ablation adds log-tenure, an active-add-on count, and historical monthly charge with safe zero-tenure handling.
 

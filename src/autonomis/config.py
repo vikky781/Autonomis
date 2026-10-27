@@ -1,5 +1,6 @@
 """Strict campaign configuration with an explicit training enable switch."""
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,8 +55,17 @@ def load_config(path):
     digest = raw["expected_sha256"]
     if not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
         raise ValueError("Invalid dataset SHA-256")
-    output = (root / raw["output_dir"]).resolve()
     campaign_root = (root / "campaigns").resolve()
+    output = (root / raw["output_dir"]).resolve()
+    current_pointer = campaign_root / "current.json"
+    if current_pointer.is_file():
+        pointer = json.loads(current_pointer.read_text(encoding="utf-8"))
+        if (not isinstance(pointer, dict) or set(pointer) != {"output_dir", "seed"}
+                or not isinstance(pointer["output_dir"], str)
+                or type(pointer["seed"]) is not int or pointer["seed"] <= 0):
+            raise ValueError("Invalid active campaign pointer")
+        output = (root / pointer["output_dir"]).resolve()
+        raw["seed"] = pointer["seed"]
     if not output.is_relative_to(campaign_root) or output == campaign_root:
         raise ValueError("Real campaign ledgers must stay under the shared campaigns directory")
     if (not isinstance(raw["history_ledgers"], list)

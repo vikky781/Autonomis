@@ -1,7 +1,9 @@
 """Sequential CPU/GPU orchestration under the shared campaign attempt budget."""
 
 import importlib.util
+import re
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from autonomis.artifacts import load_bundle
@@ -51,6 +53,36 @@ def prepare_campaign(config, *, kind="real"):
                                    split_hash=split_hash(splits), kind=kind,
                                    history_ledgers=config.history_ledgers)
     return data, splits, ledger
+
+
+def start_new_round(config, ledger):
+    """Preserve a locked round and create a fresh split using only shared budget remaining."""
+    config.permit.check()
+    if ledger.identity["kind"] != "real":
+        raise ValueError("Only real campaigns can be restarted from the dashboard")
+    if ledger.audit_lock is None:
+        raise ValueError("Archive and restart is available after the current Audit is locked")
+    if ledger.has_active_attempt:
+        raise ValueError("Wait for all campaign workers to stop before starting a new round")
+    if ledger.remaining <= 0:
+        raise ValueError("The shared 15-attempt allocation is exhausted")
+
+    campaign_root = config.root / "campaigns"
+    current_name = re.sub(r"-round-\d+$", "", config.output_dir.name)
+    round_numbers = [int(match.group(1)) for path in campaign_root.glob(f"{current_name}-round-*")
+                     if (match := re.fullmatch(re.escape(current_name) + r"-round-(\d+)", path.name))]
+    next_round = max(round_numbers, default=1) + 1
+    destination = campaign_root / f"{current_name}-round-{next_round:02d}"
+    while destination.exists():
+        next_round += 1
+        destination = campaign_root / f"{current_name}-round-{next_round:02d}"
+    next_config = replace(config, output_dir=destination, seed=config.seed + 1)
+    _, _, next_ledger = prepare_campaign(next_config)
+    write_json(campaign_root / "current.json", {
+        "output_dir": str(destination.relative_to(config.root)),
+        "seed": next_config.seed,
+    })
+    return next_config, next_ledger
 
 
 def observations(ledger, phase="search"):

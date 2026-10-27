@@ -68,6 +68,31 @@ def test_audit_lock_survives_restart_and_cannot_change_artifacts(tmp_path):
         reopened.lock_audit({**lock, "submission": "different"})
 
 
+def test_new_campaign_keeps_old_audit_locked_and_uses_only_global_remaining(tmp_path):
+    root = tmp_path / "campaigns"
+    first = Ledger.initialize(root / "reference" / "ledger.sqlite", dataset_hash="data",
+                               split_hash="split-one", kind="real")
+    for index, phase in enumerate(["search"] * 5 + ["probe"] * 2 + ["audit", "final"]):
+        attempt = first.reserve(phase, f"recipe-{index}", f"split-{index}")
+        first.finish(attempt, success=True, result={"synthetic": True})
+    lock = {"submission": "model-p", "proxy": "model-a", "audit_predictions": "pred-a"}
+    first.lock_audit(lock)
+
+    second = Ledger.initialize(root / "reference-round-02" / "ledger.sqlite",
+                               dataset_hash="data", split_hash="split-two", kind="real")
+
+    assert first.audit_lock == lock
+    assert second.audit_lock is None
+    assert second.used == 9
+    assert second.remaining == 6
+    assert second.phase_counts() == {}
+    next_attempt = second.reserve("search", "new-round-recipe", "new-round-split")
+    second.finish(next_attempt, success=True, result={"synthetic": True})
+    assert second.used == 10
+    with pytest.raises(BudgetError, match="Audit lock"):
+        first.reserve("search", "old-round-recipe", "old-round-split")
+
+
 def test_missing_corrupt_or_changed_campaign_is_not_silently_reset(tmp_path):
     with pytest.raises(ValueError):
         Ledger(tmp_path / "absent.sqlite", dataset_hash="data", split_hash="split")

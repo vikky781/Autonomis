@@ -2,6 +2,8 @@
 
 import html
 import math
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 ATTEMPT_BUDGET = 15
@@ -78,14 +80,18 @@ def _budget_chart(used):
     )
 
 
-def _campaign_story(rows, phase_counts, *, audit_lock, frozen, selection):
+def _campaign_story(rows, phase_counts, *, audit_lock, frozen, selection, shared_used):
     active = next((row for row in reversed(rows)
                    if row["status"] in {"reserved", "running"}), None)
     if audit_lock:
+        used = shared_used
+        remaining = max(0, ATTEMPT_BUDGET - used)
         return (
             "Audit is locked",
-            "The selected model identities and Audit predictions are frozen. The campaign "
-            "cannot run more training attempts.",
+            "The model identities and Audit predictions have been sealed. The lock prevents "
+            "tuning against the Audit result after it is revealed. The shared budget has "
+            f"{used} of {ATTEMPT_BUDGET} attempts used and {remaining} remaining, but this "
+            "campaign is closed to further training.",
         )
     if active:
         phase = active["phase"]
@@ -261,6 +267,45 @@ def _artifact_panel(summary, audit_lock):
     """
 
 
+def _history_panel(ledger):
+    """Show metadata from earlier local campaign ledgers without loading model artifacts."""
+    import json
+    campaign_root = next((parent for parent in Path(ledger.path).parents
+                          if parent.name == "campaigns"), None)
+    if campaign_root is None:
+        return ""
+    entries = []
+    for campaign_file in sorted(campaign_root.rglob("campaign.json")):
+        folder = campaign_file.parent
+        database = folder / "ledger.sqlite"
+        if not database.is_file() or database.resolve() == Path(ledger.path).resolve():
+            continue
+        try:
+            with closing(sqlite3.connect(
+                    f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as db:
+                count = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+                lock = db.execute("SELECT 1 FROM metadata WHERE key='audit_lock'").fetchone()
+                summary = json.loads(campaign_file.read_text(encoding="utf-8"))
+            label = folder.relative_to(campaign_root).as_posix()
+            state = "Audit locked" if lock else "Audit not locked"
+            entries.append(
+                f'<li><strong>{_text(label)}</strong><span>{count} attempt(s) · '
+                f'{_text(state)} · seed {_text(summary.get("seed"))}</span></li>'
+            )
+        except (OSError, sqlite3.Error, ValueError, json.JSONDecodeError):
+            continue
+    if not entries:
+        return ""
+    return f"""
+    <section class="section history-panel" aria-labelledby="history-title">
+      <div class="section-head"><div><span class="eyebrow">Saved runs</span>
+        <h2 id="history-title">Earlier campaign history</h2></div>
+        <p>Past attempts stay visible and continue to count toward the shared 15-attempt limit.</p></div>
+      <ul>{''.join(entries)}</ul>
+    </section>
+"""
+
+
 def render_report(ledger, destination, *, summary=None, dataset_role=None,
                   training_controls=False, csrf_token=None):
     """Render campaign evidence as a standalone page without mutating the ledger."""
@@ -274,7 +319,8 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     frozen = (campaign_dir / "frozen-recipe.json").is_file()
     selection = (campaign_dir / "selection.json").is_file()
     current_title, current_explanation = _campaign_story(
-        rows, phase_counts, audit_lock=audit_lock, frozen=frozen, selection=selection
+        rows, phase_counts, audit_lock=audit_lock, frozen=frozen, selection=selection,
+        shared_used=used,
     )
     phases = _phase_cards(phase_counts, audit_lock=audit_lock, frozen=frozen)
     data_label = {
@@ -366,7 +412,17 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     training_script = ""
     if training_controls:
         token = html.escape(str(csrf_token or ""), quote=True)
-        training_panel = """
+        restart_panel = ""
+        if audit_lock and remaining:
+            restart_panel = f"""
+      <article class="training-card restart-card">
+        <span class="eyebrow">New audit round</span><h3>Archive this run and start again</h3>
+        <p>The locked campaign stays in history. A new split starts with a fresh audit; its fits use the
+          {remaining} attempts left in the same shared 15-attempt allocation.</p>
+        <button id="restart-button" type="button">Archive and start a new round</button>
+      </article>
+"""
+        training_panel = f"""
     <section class="section training-panel" aria-labelledby="training-title">
       <div class="section-head"><div><span class="eyebrow">Experiment controls</span>
         <h2 id="training-title">Choose how to run training</h2></div>
@@ -389,6 +445,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
           <button id="full-button" type="button" disabled>Run full campaign</button>
         </article>
       </div>
+      {restart_panel}
       <p id="training-state" class="training-state" role="status" aria-live="polite">
         Checking training controls…</p>
       <p class="training-caution">Training starts only after you choose an action and confirm it.
@@ -401,6 +458,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
   const token = "__AUTONOMIS_TOKEN__";
   const manual = document.getElementById("manual-button");
   const full = document.getElementById("full-button");
+  const restart = document.getElementById("restart-button");
   const state = document.getElementById("training-state");
   const family = document.getElementById("model-family");
   let polling = false;
@@ -428,6 +486,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
       }
       manual.disabled = !data.manual_enabled || polling;
       full.disabled = !data.full_enabled || polling;
+      if (restart) restart.disabled = !data.restart_enabled || polling;
       if (data.operation && data.operation.state === "running") {
         state.textContent = data.operation.message + " Budget: " + data.attempts_used +
           "/15 used, " + data.remaining + " remaining.";
@@ -473,6 +532,22 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
   full.addEventListener("click", () => start("/api/train/full", {},
     "Run the sequential campaign now? It may use up to all remaining shared attempts. " +
     "Every failed or interrupted reservation counts."));
+  if (restart) restart.addEventListener("click", async () => {
+    if (!window.confirm("Archive this campaign in history and start a new split? Previous attempts " +
+        "remain counted; the new round can use only the remaining shared budget.")) return;
+    restart.disabled = true;
+    state.textContent = "Preparing a new campaign round and preserving the current history…";
+    try {
+      const response = await fetch("/api/campaign/restart", {method: "POST", cache: "no-store",
+        headers: {"Content-Type": "application/json", "X-Autonomis-Token": token}, body: "{}"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not start a new round.");
+      window.location.reload();
+    } catch (error) {
+      state.textContent = error.message;
+      refresh();
+    }
+  });
   refresh();
 })();
 </script>
@@ -654,6 +729,11 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     .training-card button:disabled {{ color: #687975; background: #dfe7e3; cursor: not-allowed; }}
     .training-state {{ min-height: 22px; margin: 12px 0 5px; color: var(--ink); font: 12px var(--mono); }}
     .training-caution {{ margin: 0; color: var(--muted); font-size: 11px; }}
+    .restart-card {{ margin-top: 13px; border-color: var(--accent); }}
+    .history-panel ul {{ display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }}
+    .history-panel li {{ display: flex; justify-content: space-between; gap: 16px; padding: 13px 16px;
+      background: var(--surface); border: 1px solid var(--line); border-radius: 8px; }}
+    .history-panel li span {{ color: var(--muted); font: 11px var(--mono); }}
     footer {{ margin-top: 31px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--muted);
       font-size: 11px; display: flex; justify-content: space-between; gap: 18px; }}
     @media (max-width: 1050px) {{ .metrics {{ grid-template-columns: repeat(3, 1fr); }} }}
@@ -663,6 +743,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
       .metrics {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       .charts,.artifact-grid,.metric-notes,.phase-grid {{ grid-template-columns: 1fr; }}
       .training-grid {{ grid-template-columns: 1fr; }}
+      .history-panel li {{ flex-direction: column; gap: 5px; }}
       .now-panel {{ grid-template-columns: 1fr; gap: 8px; }}
       .attempt {{ grid-template-columns: 34px minmax(0, 1fr); gap: 8px; }}
       .attempt-marker span {{ width: 29px; height: 29px; }} .attempt-marker::after {{ top: 32px; }}
@@ -748,6 +829,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
       <span class="eyebrow">Frozen terminal roles</span><h2 id="artifact-title">Locked artifacts</h2>
       {artifacts}
     </section>
+    {_history_panel(ledger)}
     <footer><span>Autonomis · derived from local campaign records</span>
       <span>Organizer equivalence and output-schema compatibility are not inferred from this report.</span></footer>
   </main>
