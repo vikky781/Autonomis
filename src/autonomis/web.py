@@ -47,26 +47,43 @@ def serve_report(ledger, output_dir, *, dataset_role, config=None, host="127.0.0
         with operation_lock:
             current = dict(operation)
         busy = current["state"] == "running"
+        campaign_rows = ledger.attempts()
+        phase_counts = ledger.phase_counts()
+        attempts_used = ledger.used
+        remaining = ledger.remaining
         training_enabled = enabled and not audit_locked
-        manual_enabled = training_enabled and not busy and ledger.remaining > 2
-        if manual_enabled and ledger.phase_counts().get("search", 0) >= 11:
+        manual_enabled = training_enabled and not busy and remaining > 2
+        if manual_enabled and phase_counts.get("search", 0) >= 11:
             manual_enabled = False
         if manual_enabled and ((output_dir / "selection.json").exists()
                                or (output_dir / "frozen-recipe.json").exists()):
             manual_enabled = False
-        full_enabled = training_enabled and not busy and ledger.remaining > 0
+        local_search_count = phase_counts.get("search", 0)
+        can_finish = (local_search_count > 0 or (output_dir / "frozen-recipe.json").exists()
+                      or (output_dir / "selection.json").exists())
+        full_enabled = (training_enabled and not busy and remaining > 0
+                        and (ledger.remaining > 2 or can_finish))
         if full_enabled and (output_dir / "selection.json").exists():
             full_enabled = False
         if busy and not reason:
             reason = "A training action is already running."
         if audit_locked and not reason:
             reason = "This round's Audit is locked. Archive it to history and start a new round to use remaining attempts."
+        if (enabled and not busy and not audit_locked and not full_enabled
+                and ledger.remaining <= 2):
+            reason = ("This round has no Search candidate, and the remaining terminal tokens are reserved. "
+                      "A new round needs at least three shared attempts.")
         return {"enabled": enabled, "manual_enabled": manual_enabled,
                 "full_enabled": full_enabled, "reason": reason,
                 "audit_locked": audit_locked,
-                "restart_enabled": enabled and audit_locked and not busy and ledger.remaining > 0,
-                "attempts_used": ledger.used, "remaining": ledger.remaining,
-                "phase_counts": ledger.phase_counts(),
+                "restart_enabled": (enabled and not busy and remaining >= 3
+                                    and (audit_locked or bool(campaign_rows))),
+                "attempts_used": attempts_used, "remaining": remaining,
+                "campaign_path": str(output_dir),
+                "campaign_attempts": len(campaign_rows),
+                "ledger_revision": [[row["id"], row["status"], row["created"]]
+                                    for row in campaign_rows],
+                "phase_counts": phase_counts,
                 "operation": current}
 
     def restart_campaign():

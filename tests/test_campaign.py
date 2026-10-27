@@ -11,6 +11,7 @@ from autonomis.config import load_config
 from autonomis.contracts import TrainingDisabled, TrainingPermit
 from autonomis.data import load_table
 from autonomis.evaluation import score_predictions
+from autonomis.ledger import Ledger
 from autonomis.reporting import render_report
 
 
@@ -78,6 +79,9 @@ def test_start_new_round_preserves_history_and_shared_budget(tmp_path):
         ledger.finish(attempt, success=True, result={"synthetic": True})
     ledger.lock_audit({"submission": "model-p", "proxy": "model-a",
                        "audit_predictions": "predictions-a"})
+    locked_report = render_report(ledger, config.output_dir / "report.html",
+                                  training_controls=True).read_text(encoding="utf-8")
+    assert 'id="restart-button" type="button">Archive this round and reset Audit' in locked_report
 
     next_config, next_ledger = campaign.start_new_round(config, ledger)
 
@@ -94,6 +98,92 @@ def test_start_new_round_preserves_history_and_shared_budget(tmp_path):
                            training_controls=True).read_text(encoding="utf-8")
     assert "Earlier campaign history" in report
     assert "reference" in report and "9 attempt(s) · Audit locked" in report
+    assert "A fresh Audit round is already active" in report
+    assert 'id="restart-button" type="button" disabled' in report
+    assert "Active round reference-round-02: 0 fit(s), Audit not locked" in report
+    assert "Earlier round reference: 9 fit(s), Audit locked" in report
+
+
+def test_fresh_round_can_train_after_prior_round_spent_shared_attempts(tmp_path, monkeypatch):
+    config = replace(load_config("configs/campaign.yaml"),
+                     output_dir=tmp_path / "campaigns" / "reference-round-02",
+                     permit=TrainingPermit(True))
+    old_dir = tmp_path / "campaigns" / "reference"
+    old = Ledger.initialize(old_dir / "ledger.sqlite", dataset_hash=config.expected_sha256,
+                            split_hash="old-round-split")
+    for index, phase in enumerate(["search"] * 5 + ["probe"] * 2 + ["audit", "final"]):
+        attempt = old.reserve(phase, f"old-recipe-{index}", f"old-membership-{index}")
+        old.finish(attempt, success=True, result={"synthetic_fixture": True})
+    old.lock_audit({"submission": "model-p", "proxy": "model-a",
+                    "audit_predictions": "predictions-a"})
+    monkeypatch.setattr(campaign, "run_attempt", inline_fixture_attempt)
+
+    result = campaign.run_single_search_attempt(config, "lr")
+
+    assert result["status"] == "succeeded"
+    assert (config.output_dir / "runtime.json").is_file()
+    _, _, current = campaign.prepare_campaign(config)
+    assert current.phase_counts() == {"search": 1}
+    assert current.used == 10 and current.remaining == 5
+
+
+def test_unlocked_nonempty_round_can_be_archived_for_fresh_audit(tmp_path):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    raw = yaml.safe_load(Path("configs/campaign.yaml").read_text(encoding="utf-8"))
+    raw["dataset"] = str(Path(raw["dataset"]).resolve())
+    raw["output_dir"] = "campaigns/reference"
+    config_path = config_dir / "campaign.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    config = load_config(config_path)
+    _, _, ledger = campaign.prepare_campaign(config)
+    attempt = ledger.reserve("search", "one-recipe", "one-split")
+    ledger.finish(attempt, success=True, result={"synthetic_fixture": True})
+
+    next_config, next_ledger = campaign.start_new_round(config, ledger)
+
+    assert next_ledger.audit_lock is None
+    assert next_ledger.attempts() == []
+    assert next_ledger.used == 1 and next_ledger.remaining == 14
+    assert ledger.attempts()[0]["status"] == "succeeded"
+
+
+def test_terminal_tokens_finish_existing_search_without_extra_search(tmp_path, monkeypatch):
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    raw = yaml.safe_load(Path("configs/campaign.yaml").read_text(encoding="utf-8"))
+    raw["dataset"] = str(Path(raw["dataset"]).resolve())
+    raw["output_dir"] = "campaigns/reference-round-02"
+    config_path = config_dir / "campaign.yaml"
+    config_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    config = replace(load_config(config_path), permit=TrainingPermit(True))
+
+    old = Ledger.initialize(tmp_path / "campaigns" / "reference" / "ledger.sqlite",
+                            dataset_hash=config.expected_sha256, split_hash="old-round-split")
+    for index, phase in enumerate(["search"] * 5 + ["probe"] * 2 + ["audit", "final"]):
+        attempt = old.reserve(phase, f"old-recipe-{index}", f"old-membership-{index}")
+        old.finish(attempt, success=True, result={"synthetic_fixture": True})
+    old.lock_audit({"submission": "model-p", "proxy": "model-a",
+                    "audit_predictions": "predictions-a"})
+    monkeypatch.setattr(campaign, "run_attempt", inline_fixture_attempt)
+
+    for _ in range(4):
+        campaign.run_single_search_attempt(config, "lr")
+    _, _, current = campaign.prepare_campaign(config)
+    assert current.used == 13 and current.remaining == 2
+    report = render_report(current, config.output_dir / "report.html",
+                           training_controls=True).read_text(encoding="utf-8")
+    assert "Finish this round before resetting" in report
+    assert "Reset unavailable · 2 attempts remain" in report
+    with pytest.raises(ValueError, match="at least three shared attempts"):
+        campaign.start_new_round(config, current)
+
+    outcome = campaign.run_campaign(config)
+    _, _, completed = campaign.prepare_campaign(config)
+
+    assert outcome["attempts_used"] == 15
+    assert completed.audit_lock is not None
+    assert completed.phase_counts() == {"search": 4, "audit": 1, "final": 1}
 
 
 def test_complete_simulated_campaign_locks_distinct_proxy_and_final_roles(tmp_path, monkeypatch):

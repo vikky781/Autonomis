@@ -81,6 +81,20 @@ def test_report_zero_attempts_shows_empty_read_only_dashboard(tmp_path):
     assert "does not train or reserve attempts" in content
 
 
+def test_training_dashboard_separates_round_counter_and_refreshes_stale_evidence(tmp_path):
+    ledger = Ledger.initialize(tmp_path / "campaigns" / "round-01" / "ledger.sqlite",
+                               dataset_hash="d", split_hash="s")
+
+    content = render_report(ledger, tmp_path / "campaigns" / "round-01" / "report.html",
+                            training_controls=True, csrf_token="token").read_text()
+
+    assert '<span id="shared-attempts-used">0</span> <span>/ 15</span>' in content
+    assert '<span id="round-attempts-used">0</span> <span>/ 15</span>' in content
+    assert "let lastLedgerSnapshot = JSON.stringify" in content
+    assert "if (ledgerSnapshot !== lastLedgerSnapshot)" in content
+    assert "window.location.reload();" in content
+
+
 def test_report_separates_search_audit_and_hidden_test_evidence(tmp_path):
     ledger = Ledger.initialize(tmp_path / "campaign.sqlite", dataset_hash="d", split_hash="s")
     search_id = ledger.reserve("search", "search-key", "search-split", details={

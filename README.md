@@ -1,30 +1,74 @@
 # Autonomis
 
-Budget-constrained customer churn experimentation for Utkrishta 2026. The controller proposes experiments from prior development results, with a persistent maximum of 15 training attempts.
+**A budget-aware experiment controller for customer churn prediction.**
 
-**Current boundary:** CPU and CatBoost GPU execution paths are implemented. The current local ledger records nine real CPU fits; the Audit is locked for that round. The local dashboard and CLI allow explicit training actions on any machine where the project and required packages are available. Native-model round-trips and GPU execution still need verification. Test fixtures do not represent measured model performance.
+Autonomis is our Challenge 1 project for the Utkrishta 2026 AI/ML Hackathon. It turns model experimentation into an auditable campaign: each fit is proposed, reserved against a shared limit, evaluated on a named split, and recorded with its recipe and artifacts. The goal is to make each experiment informative while keeping the full campaign within the 15-fit limit.
 
-## Safe local setup
+**Presentation:** [Autonomis — Utkrishta 2026 (PowerPoint)](slides/output/Autonomis_Utkrishta_2026.pptx). The deck reports local reference-data evidence and marks organizer results as unavailable.
 
-Python 3.12 is the tested interpreter series. Use a new virtual environment. The development lock has been verified for no-training tests on Windows and Ubuntu; native tree-model/GPU compatibility still needs verification on the training laptop.
+## At a glance
+
+| | Current project evidence |
+|---|---|
+| Challenge | Challenge 1 — Autonomous AI Data Scientist |
+| Dataset currently configured | Public IBM Telco Customer Churn reference data |
+| Campaign allocation | 15 attempts shared across rounds |
+| Recorded real fits | 15 successful CPU fits across two rounds (9 + 6) |
+| Current round | `reference-round-02`, four Search fits, Audit and final fit; Audit locked |
+| Remaining allocation | 0 of 15 attempts |
+| Best recorded Search ROC-AUC | 0.869660 (Search split; not hidden-test performance) |
+| Current Audit proxy ROC-AUC / Average Precision | 0.853652 / 0.672107 |
+| Official organizer data match | Not verified |
+| Official submission schema / hidden-test score | Not available |
+
+The original round is preserved in `campaigns/reference/`; the active-round pointer is local, ignored state in `campaigns/current.json`. The global ledger counts attempts across rounds. Starting another round preserves history and **does not reset** the allocation. The current round's six fits and the global 15/15 count are separate counters. All attempts in this allocation are now used.
+
+## What it does
+
+- Validates the input dataset and records its SHA-256 fingerprint.
+- Creates deterministic, immutable row splits for Train, Search, and Audit.
+- Applies training-only preprocessing to avoid leakage.
+- Proposes a finite sequence of experiments from previous results and records the reason for each proposal.
+- Enforces one durable 15-attempt budget across campaign rounds. Failed and interrupted reservations count.
+- Runs either one manually selected Search experiment or a sequential campaign from the local dashboard.
+- Stores model bundles, run metadata, metrics, and prediction-export provenance.
+- Presents the campaign as a judge-facing local dashboard and a read-only report.
+
+The implemented model families are Logistic Regression, CatBoost, and LightGBM. All 15 saved fits in the current evidence are Logistic Regression on CPU; the other model families are available in the code but are not represented in those results. CatBoost GPU support has preflight checks, but a native GPU fit and serialization round-trip have not been verified.
+
+## Run the local demo
+
+The dashboard uses Python's standard-library HTTP server and runs on a CPU. No GPU or JavaScript build is needed to view the interface.
 
 ```bash
 python -m venv .venv
-# Ubuntu:
-source .venv/bin/activate
-# Windows PowerShell instead:
-# .venv\Scripts\Activate.ps1
+source .venv/bin/activate          # Windows: .venv\Scripts\Activate.ps1
 python -m pip install -r requirements-dev.lock
 python -m pip install -e .
-python -m pytest
-python -m ruff check src tests
+python -m autonomis serve
 ```
 
-The test suite forbids real Logistic Regression fitting. CatBoost and LightGBM packages are not needed for no-training development tests. Static prediction fixtures and fake workers test model boundaries without learning parameters.
+Open [http://127.0.0.1:8502](http://127.0.0.1:8502). The server binds to loopback by default. Training actions require an explicit dashboard action and confirmation. Keep the server running while a worker is active.
 
-## Commands that do not train
+### Start an experiment
 
-Run from the repository root:
+The checked-in configuration enables training. The dashboard presents two actions:
+
+1. **Train one Search attempt** runs one selected model family.
+2. **Run full campaign** runs the sequential campaign, subject to phase gates, remaining budget, and deadlines.
+
+The CLI requires an explicit execution flag:
+
+```bash
+python -m autonomis status      # read-only budget and lock status
+python -m autonomis plan        # read-only next proposal
+python -m autonomis preflight   # read-only backend readiness
+python -m autonomis train --execute
+```
+
+When at least three shared attempts remain, use **Archive this round and reset Audit** in the dashboard to preserve a round and create a fresh split. A brand-new empty round explains that its Audit is already fresh. Starting a new round resets only the round-local counter; the shared allocation total never resets. In the completed run documented here, the last two attempts went to the current round's Audit and final fit; the 15-attempt allocation is now exhausted.
+
+### Read-only commands
 
 ```bash
 python -m autonomis profile
@@ -33,96 +77,92 @@ python -m autonomis preflight
 python -m autonomis status
 python -m autonomis plan
 python -m autonomis report
-python -m autonomis serve
-# after verifying a worker has stopped:
+```
+
+`prepare` creates campaign metadata and splits but does not fit an estimator or consume an attempt. `report` reads saved evidence and does not train. If a worker is interrupted, first verify that it has stopped; only then reconcile its reservation:
+
+```bash
 python -m autonomis reconcile --confirm-no-active-worker
 ```
 
-- `profile` verifies the raw CSV fingerprint, validates the schema, and reports data counts only.
-- `prepare` creates immutable customer partitions, campaign metadata and an empty SQLite ledger. It fits no preprocessing or predictive estimator and consumes zero attempts.
-- `preflight` checks the configured backend without fitting or reserving an attempt. GPU mode checks dataset size, CatBoost availability, NVIDIA driver/device visibility and free VRAM.
-- `status` reads the consumed/remaining budget and audit-lock state.
-- `plan` prints the next proposed recipe and rationale without reserving or running it.
-- `report` renders a local read-only HTML history. With no fits it explicitly says no trained artifact/score is available. Simulated histories are labelled synthetic.
-- `serve` hosts the judge-facing campaign demo on `http://127.0.0.1:8502`. It shows a manually selected Search fit and a sequential campaign runner. After Audit locks, **Archive and start a new round** preserves the old ledger, creates a fresh split, and uses only the remaining shared attempts. Training is enabled in the checked-in config and is not tied to a particular machine. The sequential runner may stop early when phase gates or runtime deadlines require it.
-- `reconcile` marks a reserved/running worker as interrupted only after explicit operator confirmation; the reservation remains consumed.
+## Experiment strategy
 
-The browser demo is generated from the campaign ledger and uses Python's standard-library HTTP server. It needs no GPU, JavaScript build, or extra web package. The dashboard shows the current phase and why the next step follows, while retaining detailed run cards and a clear separation between Search, Audit-proxy, final-fit, and hidden-test evidence.
+Each round separates exploratory selection from terminal evaluation:
 
-Generated state is under `campaigns/` and ignored by Git. A shared budget index under `campaigns/.global-budget.sqlite` counts real attempts across campaign rounds, including archived ledgers. Audit locks and phase limits apply per round; the 15-attempt ceiling applies across the whole allocation. A new round does not clear prior attempt counts. Optional `history_ledgers` can import external historical runs; configured sources must remain available or ledger setup fails closed. Never delete or replace a ledger to obtain more fits.
+| Phase | Purpose | Per-round cap |
+|---|---|---:|
+| Search | Explore recipes using Train / Search partitions while keeping Audit held out | 11 |
+| Probe | Compare frozen finalists on a shared additional development split | 2 |
+| Audit | Evaluate the frozen audit proxy once | 1 |
+| Final | Fit the selected submission candidate on all labelled development rows | 1 |
+| **Per-round maximum** |  | **15** |
 
-An archived campaign remains visible in the dashboard history. The current round pointer is saved locally under `campaigns/current.json`, so CLI commands and the dashboard resume the latest round after restart.
+The global allocation enforces 15 attempts total across rounds. The finite planner uses prior results, changes one knob at a time, can switch model families on stagnation, and records its rationale. Duplicate successful recipe/split pairs return their existing result instead of triggering another fit. Reservations are irreversible, including failures and interruptions.
 
-## Starting training
+The Search partition is used for selection. Audit metrics belong to a separately identified proxy model trained on development data, not the full-data final model. The full-data fit has no internal held-out score by design. Search and Audit values are not hidden-test results.
 
-`configs/campaign.yaml` has `enable_training: true`. The dashboard offers one manually selected Search fit or the complete sequential campaign. The CLI still requires the explicit `--execute` flag:
+## Saved results
 
-```bash
-python -m autonomis train --execute
+The following values come from the saved reference-round ledger and its report:
+
+| Evidence | Result | Interpretation |
+|---|---:|---|
+| Best Search ROC-AUC | 0.869660 | Best of five successful Search fits |
+| Best Search Average Precision | 0.695799 | Same Search result; not a hidden-test score |
+| Current round best Search ROC-AUC / Average Precision | 0.859300 / 0.702953 | Best of four Search fits on a new split |
+| Round 1 Audit proxy ROC-AUC / Average Precision | 0.851950 / 0.668741 | Applies to the locked round 1 proxy |
+| Current round Audit proxy ROC-AUC / Average Precision | 0.853652 / 0.672107 | Applies to the locked `reference-round-02` proxy |
+| Full-data final model | Saved | No held-out metric is recorded for this fit |
+| Hidden-test metric / Efficiency Factor | Unavailable | Organizer evaluation data and a verified formula input are not present |
+
+The official challenge defines the primary metric as hidden-test ROC-AUC and the final score as ROC-AUC multiplied by an Efficiency Factor. This repository does not define that factor or contain an organizer evaluation result, so neither is estimated here.
+
+## Data and submission status
+
+The configured dataset is the public IBM Telco Customer Churn reference file with 7,043 rows and 21 columns. Its recorded SHA-256 is:
+
+```text
+16320c9c1ec72448db59aa0a26a0b95401046bef5d02fd3aeb906448e3055e91
 ```
 
-Training can run from any machine using this project. The dashboard binds to loopback by default; each action requires a button click and confirmation. Every reservation, including failed or interrupted work, consumes one of the same 15 shared attempts. Adapters are isolated in `training.py`; CatBoost and LightGBM are optional packages declared in the `cpu` and `gpu` extras.
+This fingerprint shows which public file the local campaign used; it does not prove equivalence to the dataset supplied through the organizer portal. Do not obtain or use labels for organizer-held-out customers.
 
-## CatBoost GPU profile
+The prediction export currently uses a **provisional** two-column contract (`customerID`, `churn_probability`). The organizer's sample submission and exact output schema have not been verified. Treat the saved model as a fitted candidate, not a completed or validated hackathon submission. Before submission, confirm the official data, row identities and order, score semantics, required header, and output format.
 
-GPU mode is opt-in with `backend: gpu` and changes only CatBoost; Logistic Regression and LightGBM remain on CPU. It uses the frozen recipe profile from the plan: device 0, GPU RAM fraction 0.75, Plain boosting, border count 128 and maximum CTR complexity 2. Backend and resolved parameters are part of recipe/artifact identity. No automatic CPU retry or backend switch occurs after a reserved GPU attempt fails.
+## Setup for development
 
-Before the first GPU attempt, preflight requires more than 50,000 labelled rows, CatBoost from the supported `gpu` extra, visible NVIDIA device 0 with driver information, and at least 6,144 MiB free VRAM. The 7,043-row IBM reference therefore remains a CPU campaign. Preflight does not train and does not prove native GPU fitting/serialization compatibility. CatBoost GPU retraining is not promised to be bitwise deterministic.
-
-After verifying the accepted dataset and local package/driver compatibility, install the desired native extras in the isolated environment and run the read-only check:
+Python 3.12 is the verified interpreter series. The locked development dependencies support linting and no-training tests; native tree-model and GPU compatibility should be checked separately on the intended machine.
 
 ```bash
-python -m pip install -e '.[cpu,gpu]'
-python -m autonomis preflight
+python -m pip install -r requirements-dev.lock
+python -m pip install -e .
+python -m pytest
+python -m ruff check src tests
 ```
 
-Select `backend: gpu` before the campaign starts only when its data gate is met; backend changes are rejected on resume.
+The no-training test suite uses fake workers and prediction fixtures. It does not establish model performance. CatBoost and LightGBM are optional CPU extras. GPU mode is opt-in and is limited to CatBoost; preflight checks data size, package, driver/device visibility, and free VRAM. A preflight pass does not itself verify a native GPU fit.
 
-## Experiment protocol
+## Repository map
 
-| Stage | Per-round maximum attempts |
-|---|---:|
-| Initial LR / CatBoost / LightGBM anchors | 3 |
-| Adaptive search and one feature ablation | 8 |
-| Two frozen finalists on one shared development split | 2 |
-| Audit proxy A trained on development 80% | 1 |
-| Submission candidate P trained on all labelled training rows | 1 |
-| **Total** | **15** |
-
-Reservations are consumed even when a worker fails, times out or crashes. One SQLite transaction protects the shared allocation capacity; only one reservation/worker may be active. Search/checks cannot consume the two reserved terminal tokens within a round. A duplicate successful recipe/split returns its existing result; there is no automatic failed-fit retry. Native fitting runs in a supervised spawned worker with a configured timeout.
-
-Search uses Train 60% / Search 20%, with Audit 20% held out of search. Train-only learned preprocessing prevents leakage. The finite planner mutates one knob at a time, prioritizes capacity/regularization from feedback, switches families on stagnation, and records every actual decision. The fixed V1 ablation adds log-tenure, an active-add-on count, and historical monthly charge with safe zero-tenure handling.
-
-The winner and tree count are frozen before terminal fitting. A is fitted on development 80%; its Audit predictions are saved before P uses all labels. Submission selection is technical-only: P, otherwise A, otherwise verified cached search artifact F. Audit proxy is A, otherwise F. Both choices lock before Audit metrics are revealed. **The full-data P model has no internal held-out score; Audit metrics describe A/F only.**
-
-Interrupted workers require explicit reconciliation after verifying the recorded process is stopped. Do not blindly relaunch a second campaign or retry an unknown active worker. Keep failed attempts visible. Replaying reports/inference does not fit or spend tokens.
-
-## Artifact-only inference
-
-After a verified artifact is produced on the training machine, inference uses the saved model/preprocessing and never fits:
-
-```bash
-python -m autonomis predict --artifact PATH_TO_BUNDLE --input INPUT.csv --output predictions.csv
+```text
+src/autonomis/             campaign, planner, ledger, training, prediction, reporting
+configs/campaign.yaml      checked-in campaign configuration
+data/reference/            public IBM reference dataset and provenance note
+docs/architecture.md       execution flow and component boundaries
+docs/implementation-status.md  verified state and outstanding gaps
+campaigns/                 ignored local ledgers, splits, and saved artifacts
+slides/output/             generated hackathon presentation
 ```
 
-Only load trusted bundles produced by this project: joblib is not a sandbox for untrusted files. The loader checks model-file hashes and recorded core package versions before deserializing. Input must include the 19 reference predictors and unique customerID values. Missing required features fail clearly; legitimate unknown categories use the saved encoder policy. Positive scores are selected by class label, not column-position guessing.
+See [architecture](docs/architecture.md) for module contracts and [implementation status](docs/implementation-status.md) for verified behavior and open work.
 
-Exports preserve customer order, validate finite probabilities, are read back from disk and have sidecar model/input/contract provenance. Existing exports cannot be overwritten with different content. The current two-column output is **provisional**, not an invented organizer submission format.
+## Known gaps before judging
 
-## Data and score honesty
+1. Verify that the organizer portal dataset matches the public reference file and record the evidence.
+2. Confirm the official sample submission schema and export a compatible file.
+3. Verify organizer data equivalence and the official output contract before preparing a submission.
+4. Report the official hidden-test ROC-AUC and Efficiency Factor only when the organizer supplies them.
+5. Verify native CatBoost/LightGBM serialization and GPU behavior before presenting those paths as operational results.
+6. Add the verified team-member roster to the cover slide; it was not present in this repository.
 
-The downloaded public IBM file has 7,043 rows, 21 columns, 1,869 positive labels, 11 blank TotalCharges values and no duplicated customer IDs. The byte fingerprint is recorded in [the provenance note](data/reference/ibm_telco/README.md). Git preserves CSV bytes across Windows/Ubuntu checkouts.
-
-The official portal files, hidden-test membership and sample submission are not available. Public-data equivalence is unverified. Do not look up public labels for organizer-held-out customers, silently augment training with them, or call an internal holdout the organizer's hidden test.
-
-Before an official run, replace the provisional output contract with the organizer's exact sample-submission schema and verify row identity, ordering, score semantics, and header policy. `official_submission` records that intent but does not claim compatibility by itself.
-
-ROC-AUC and Average Precision are named separately; trapezoidal PR area is not silently substituted for AP. Search/probe results are selection estimates. Hidden-test score and the PDF's undefined Efficiency Factor remain unavailable, never zero or invented. No performance improvement or winning score has been established.
-
-## Architecture and plan
-
-- [Architecture and module contracts](docs/architecture.md)
-- [Current implementation plan](docs/superpowers/plans/2026-10-26-autonomous-ai-data-scientist-v2.md)
-- [Execution status and explicit deviations](docs/implementation-status.md)
-
-The repository is developed directly on main with one-file commits at the user's request. CI runs lint and no-training tests. No slides are generated.
+The project is designed for transparent demonstration: it distinguishes implementation capability, completed local fits, and organizer-verified outcomes.

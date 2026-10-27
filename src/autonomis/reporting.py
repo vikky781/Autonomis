@@ -1,6 +1,7 @@
 """Derived, read-only HTML evidence. Rendering never executes a training path."""
 
 import html
+import json
 import math
 import sqlite3
 from contextlib import closing
@@ -131,6 +132,18 @@ def _campaign_story(rows, phase_counts, *, audit_lock, frozen, selection, shared
             "Campaign needs review",
             "Terminal attempts are recorded but the Audit lock is not present. Review the "
             "saved campaign evidence before continuing.",
+        )
+    if shared_used >= ATTEMPT_BUDGET - 2 and phase_counts.get("search", 0):
+        return (
+            "Finalize the current Search candidates",
+            "The two remaining shared attempts are reserved for this round's Audit and final fit. "
+            "Run the sequential campaign to select from the saved Search results and complete both steps.",
+        )
+    if shared_used >= ATTEMPT_BUDGET - 2:
+        return (
+            "No Search candidate in this round",
+            "The two remaining shared attempts are reserved for terminal steps, but this round has no "
+            "Search result to evaluate. A new round needs at least three shared attempts.",
         )
     if phase_counts.get("search", 0):
         return (
@@ -286,6 +299,8 @@ def _history_panel(ledger):
                 count = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
                 lock = db.execute("SELECT 1 FROM metadata WHERE key='audit_lock'").fetchone()
                 summary = json.loads(campaign_file.read_text(encoding="utf-8"))
+            if count == 0 and not lock:
+                continue
             label = folder.relative_to(campaign_root).as_posix()
             state = "Audit locked" if lock else "Audit not locked"
             entries.append(
@@ -306,6 +321,40 @@ def _history_panel(ledger):
 """
 
 
+def _round_notice(ledger, current_count, used, remaining):
+    """Explain how the active round relates to earlier rounds and shared budget."""
+    campaign_dir = Path(ledger.path).parent
+    campaign_root = next((parent for parent in campaign_dir.parents
+                          if parent.name == "campaigns"), None)
+    if campaign_root is None:
+        return ""
+    locked = ledger.audit_lock is not None
+    prior = []
+    for campaign_file in campaign_root.rglob("campaign.json"):
+        folder = campaign_file.parent
+        database = folder / "ledger.sqlite"
+        if not database.is_file() or database.resolve() == Path(ledger.path).resolve():
+            continue
+        try:
+            with closing(sqlite3.connect(
+                    f"file:{database.resolve().as_posix()}?mode=ro", uri=True)) as db:
+                count = db.execute("SELECT COUNT(*) FROM attempts").fetchone()[0]
+                audit_lock = db.execute(
+                    "SELECT 1 FROM metadata WHERE key='audit_lock'").fetchone()
+            if count or audit_lock:
+                prior.append((folder.stat().st_mtime, folder.name, count, bool(audit_lock)))
+        except (OSError, sqlite3.Error):
+            continue
+    message = (f"Active round {campaign_dir.name}: {current_count} fit(s), Audit "
+               f"{'locked' if locked else 'not locked'}.")
+    if prior:
+        _, name, count, prior_locked = max(prior)
+        message += (f" Earlier round {name}: {count} fit(s), Audit "
+                    f"{'locked' if prior_locked else 'not locked'}.")
+    return (message + f" Shared allocation: {used}/15 used, {remaining} remaining. "
+            "Starting a new round never resets this count.")
+
+
 def render_report(ledger, destination, *, summary=None, dataset_role=None,
                   training_controls=False, csrf_token=None):
     """Render campaign evidence as a standalone page without mutating the ledger."""
@@ -318,6 +367,14 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     campaign_dir = Path(ledger.path).parent
     frozen = (campaign_dir / "frozen-recipe.json").is_file()
     selection = (campaign_dir / "selection.json").is_file()
+    initial_ledger_snapshot = json.dumps({
+        "campaign_path": str(campaign_dir),
+        "attempts_used": used,
+        "campaign_attempts": len(rows),
+        "audit_locked": bool(audit_lock),
+        "phase_counts": phase_counts,
+        "ledger_revision": [[row["id"], row["status"], row["created"]] for row in rows],
+    }, separators=(",", ":")).replace("<", "\\u003c")
     current_title, current_explanation = _campaign_story(
         rows, phase_counts, audit_lock=audit_lock, frozen=frozen, selection=selection,
         shared_used=used,
@@ -412,14 +469,49 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     training_script = ""
     if training_controls:
         token = html.escape(str(csrf_token or ""), quote=True)
-        restart_panel = ""
-        if audit_lock and remaining:
+        if audit_lock and remaining >= 3:
             restart_panel = f"""
       <article class="training-card restart-card">
         <span class="eyebrow">New audit round</span><h3>Archive this run and start again</h3>
-        <p>The locked campaign stays in history. A new split starts with a fresh audit; its fits use the
-          {remaining} attempts left in the same shared 15-attempt allocation.</p>
-        <button id="restart-button" type="button">Archive and start a new round</button>
+        <p>This round's Audit is locked. Preserve it in history and start a fresh split. Previous fits
+          remain counted; the new round can use the {remaining} attempts left in the shared allocation.</p>
+        <button id="restart-button" type="button">Archive this round and reset Audit</button>
+      </article>
+"""
+        elif remaining >= 3 and rows:
+            restart_panel = f"""
+      <article class="training-card restart-card">
+        <span class="eyebrow">New audit round</span><h3>Start a fresh Audit round</h3>
+        <p>Archive this round to history and make a new split. Its {len(rows)} fit(s) stay counted;
+          the new round can use the same allocation's remaining {remaining} attempts.</p>
+        <button id="restart-button" type="button">Archive this round and reset Audit</button>
+      </article>
+"""
+        elif remaining > 0 and rows:
+            restart_panel = f"""
+      <article class="training-card restart-card">
+        <span class="eyebrow">New audit round</span><h3>Finish this round before resetting</h3>
+        <p>This round has {len(rows)} fit(s). The last {remaining} shared attempt(s) are reserved for its
+          Audit and final steps. Use the sequential campaign to complete it; a fresh round needs at least three attempts.</p>
+        <button id="restart-button" type="button" disabled>Reset unavailable · {remaining} attempts remain</button>
+      </article>
+"""
+        elif remaining > 0:
+            restart_panel = f"""
+      <article class="training-card restart-card" aria-labelledby="round-state-title">
+        <span class="eyebrow">New audit round</span><h3 id="round-state-title">A fresh Audit round is already active</h3>
+        <p>This round has no fits yet, so there is nothing to reset here. The earlier locked Audit stays in
+          history. Its local fit count starts at 0/15; the shared allocation still has {used}/15 attempts used
+          and {remaining} remaining.</p>
+        <button id="restart-button" type="button" disabled>Fresh round already active</button>
+      </article>
+"""
+        else:
+            restart_panel = """
+      <article class="training-card restart-card">
+        <span class="eyebrow">New audit round</span><h3>Shared allocation exhausted</h3>
+        <p>All 15 attempts remain recorded in campaign history. A new round cannot add more attempts to this allocation.</p>
+        <button id="restart-button" type="button" disabled>15 of 15 attempts used</button>
       </article>
 """
         training_panel = f"""
@@ -461,6 +553,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
   const restart = document.getElementById("restart-button");
   const state = document.getElementById("training-state");
   const family = document.getElementById("model-family");
+  let lastLedgerSnapshot = JSON.stringify(__INITIAL_LEDGER_SNAPSHOT__);
   let polling = false;
   async function refresh() {
     try {
@@ -470,6 +563,8 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
       const remaining = Math.max(0, Number(data.remaining) || 0);
       const usedBounded = Math.min(15, used);
       document.getElementById("shared-attempts-used").textContent = used;
+      document.getElementById("round-attempts-used").textContent =
+        Math.max(0, Number(data.campaign_attempts) || 0);
       document.getElementById("attempts-remaining").textContent = remaining;
       document.getElementById("shared-budget-bar").setAttribute("aria-valuenow", usedBounded);
       document.getElementById("shared-budget-fill").style.width = (usedBounded / 15 * 100) + "%";
@@ -483,6 +578,18 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
         document.getElementById("phase-fill-" + phase).style.width = (bounded / limit * 100) + "%";
         document.getElementById("phase-count-" + phase).textContent = bounded;
         document.getElementById("phase-remaining-" + phase).textContent = Math.max(0, limit - count);
+      }
+      const ledgerSnapshot = JSON.stringify({
+        campaign_path: data.campaign_path,
+        attempts_used: used,
+        campaign_attempts: Math.max(0, Number(data.campaign_attempts) || 0),
+        audit_locked: Boolean(data.audit_locked),
+        phase_counts: data.phase_counts || {},
+        ledger_revision: data.ledger_revision || [],
+      });
+      if (ledgerSnapshot !== lastLedgerSnapshot) {
+        window.location.reload();
+        return;
       }
       manual.disabled = !data.manual_enabled || polling;
       full.disabled = !data.full_enabled || polling;
@@ -551,7 +658,8 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
   refresh();
 })();
 </script>
-""".replace("__AUTONOMIS_TOKEN__", token)
+""".replace("__AUTONOMIS_TOKEN__", token).replace(
+            "__INITIAL_LEDGER_SNAPSHOT__", initial_ledger_snapshot)
     if not timeline_html:
         if used == 0:
             empty_timeline = (
@@ -577,6 +685,8 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
         "Read-only report: this page does not train or reserve attempts. Organizer dataset "
         "equivalence and submission compatibility must be verified separately."
     )
+    if training_controls:
+        notice_text += " " + _round_notice(ledger, len(rows), used, remaining)
 
     content = f"""<!doctype html>
 <html lang="en">
@@ -623,7 +733,7 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
     .mode-pill.simulation {{ color: #80361f; background: var(--soft-warm); }}
     .notice {{ margin: 0 0 22px; padding: 13px 16px; border-left: 3px solid var(--warning);
       background: #fff9e8; color: #5b4b21; font-size: 13px; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }}
+    .metrics {{ display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }}
     .metric-card {{ min-height: 124px; padding: 17px; background: var(--surface); border: 1px solid var(--line);
       border-radius: 4px 14px 14px 14px; box-shadow: 0 3px 8px #193b3310; }}
     .metric-label {{ color: var(--muted); font-size: 12px; }}
@@ -779,6 +889,9 @@ def render_report(ledger, destination, *, summary=None, dataset_role=None,
         <span class="metric-hint">Across campaigns · failed and interrupted reservations count.</span></article>
       <article class="metric-card"><span class="metric-label">Attempts remaining</span>
         <strong id="attempts-remaining" class="metric-value">{remaining}</strong><span class="metric-hint">Hard limit across all phases.</span></article>
+      <article class="metric-card"><span class="metric-label">Fits in this round</span>
+        <strong class="metric-value"><span id="round-attempts-used">{len(rows)}</span> <span>/ 15</span></strong>
+        <span class="metric-hint">Round-local count resets on a new round; shared use remains cumulative.</span></article>
       <article class="metric-card"><span class="metric-label">Best Search ROC-AUC</span>
         <strong class="metric-value">{best_text}</strong><span class="metric-hint">Search validation only · not hidden-test performance.</span></article>
       <article class="metric-card"><span class="metric-label">Audit status</span>

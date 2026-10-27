@@ -56,16 +56,16 @@ def prepare_campaign(config, *, kind="real"):
 
 
 def start_new_round(config, ledger):
-    """Preserve a locked round and create a fresh split using only shared budget remaining."""
+    """Archive a nonempty round and create a fresh split within the shared budget."""
     config.permit.check()
     if ledger.identity["kind"] != "real":
         raise ValueError("Only real campaigns can be restarted from the dashboard")
-    if ledger.audit_lock is None:
-        raise ValueError("Archive and restart is available after the current Audit is locked")
+    if ledger.audit_lock is None and not ledger.attempts():
+        raise ValueError("This round is already fresh; run an experiment before starting another round")
     if ledger.has_active_attempt:
         raise ValueError("Wait for all campaign workers to stop before starting a new round")
-    if ledger.remaining <= 0:
-        raise ValueError("The shared 15-attempt allocation is exhausted")
+    if ledger.remaining < 3:
+        raise ValueError("A fresh round needs at least three shared attempts: one Search fit and two terminal fits")
 
     campaign_root = config.root / "campaigns"
     current_name = re.sub(r"-round-\d+$", "", config.output_dir.name)
@@ -127,7 +127,7 @@ def run_single_search_attempt(config, family):
         if runtime["backend"] != config.backend or runtime["families"] != list(available):
             raise ValueError("Configured backend or supported families changed on resume")
     else:
-        if ledger.used:
+        if ledger.attempts():
             raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
         runtime = {"families": list(available),
                    "backend": config.backend, "started_at": time.time()}
@@ -239,7 +239,7 @@ def run_campaign(config, *, kind="real", families=None):
                 or runtime.get("backend") != config.backend):
             raise ValueError("Configured backend or supported families changed on resume")
     else:
-        if ledger.used:
+        if ledger.attempts():
             raise ValueError("Missing runtime after consumed attempts; frozen deadlines cannot reset")
         runtime = {"families": list(available),
                    "backend": config.backend, "started_at": time.time()}
@@ -271,7 +271,9 @@ def run_campaign(config, *, kind="real", families=None):
 
     freeze_path = config.output_dir / "frozen-recipe.json"
     if not freeze_path.exists():
-        while time.time() < exploration_deadline:
+        # The final two shared tokens are reserved for Audit and full-data fitting.
+        # Stop Search cleanly at that boundary and select from the existing Search evidence.
+        while time.time() < exploration_deadline and ledger.remaining > 2:
             attempted = [Recipe(**row["details"]["recipe"]) for row in ledger.attempts()
                          if row["phase"] == "search"]
             proposal = planner.propose(observations(ledger), attempted)
